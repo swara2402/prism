@@ -24,7 +24,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 # Force test environment BEFORE any settings import
 os.environ["APP_ENV"] = "test"
 os.environ["DATABASE_URL"] = "sqlite+aiosqlite:///:memory:"
-os.environ["DATABASE_SYNC_URL"] = "sqlite:///./waypoint-ci.db"
+os.environ["DATABASE_SYNC_URL"] = "sqlite:///:memory:"
 os.environ["ENABLE_NEO4J"] = "false"
 os.environ["ENABLE_OLLAMA"] = "false"
 os.environ["ENABLE_FAISS"] = "false"
