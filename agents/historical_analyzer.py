@@ -1,10 +1,8 @@
-"""
-agents.historical_analyzer
-==========================
+"""Historical evidence agent.
 
-Looks up similar past incidents from :mod:`memory` and surfaces their
-root causes / resolutions.  Acts as the bridge between the agent layer
-and the incident-memory store.
+Historical incidents are contextual evidence only.  Similarity is never
+converted into a probability and historical matches cannot by themselves
+confirm a root cause.
 """
 from __future__ import annotations
 
@@ -14,61 +12,52 @@ from agents.base import BaseAgent, FindingPayload
 
 
 class HistoricalAnalyzerAgent(BaseAgent):
-    """Agent that consults past incident memory."""
-
     name = "historical_analyzer"
     supported_incident_types = ["*"]
     requires = ["logs"]
     priority = 15
 
     async def investigate(self, context: Dict[str, Any]) -> FindingPayload:
-        # Import here to avoid circular import at module load.
         from memory.store import MemoryStore
 
         logs: List[str] = context.get("logs", [])
         affected: List[str] = list(context.get("affected_services", []))
+        tenant_id = context.get("tenant_id")
         query = " ".join(logs[:50]) + " " + " ".join(affected)
-
-        store = MemoryStore.get()
-        hits = await store.search(query, top_k=5)
+        hits = await MemoryStore.get().search(query, top_k=5, tenant_id=tenant_id)
 
         if not hits:
             return FindingPayload(
                 agent_name=self.name,
                 finding_type="historical_search",
                 description="No similar past incidents found.",
-                confidence=0.2,
+                confidence=0.0,
                 evidence={"hits": []},
                 hypotheses=[],
+                metadata={"provenance": {"source_type": "historical", "codepath": self.name}},
             )
 
-        hypotheses: List[str] = []
-        weighted_root_causes: Dict[str, float] = {}
-        for h in hits:
-            cause = h.root_cause
-            weighted_root_causes[cause] = (
-                weighted_root_causes.get(cause, 0.0) + h.similarity
-            )
-            hypotheses.append(
-                f"Past incident root cause '{cause}' (similarity={h.similarity:.2f})."
-            )
+        grouped: Dict[str, List[float]] = {}
+        for hit in hits:
+            grouped.setdefault(hit.root_cause, []).append(hit.similarity)
 
-        # Pick the most-voted cause
-        best_cause = max(weighted_root_causes, key=weighted_root_causes.get) if weighted_root_causes else None
-        confidence = (
-            min(1.0, weighted_root_causes.get(best_cause, 0.0))
-            if best_cause
-            else 0.2
-        )
+        best_cause = max(grouped, key=lambda cause: max(grouped[cause]))
+        best_similarity = max(grouped[best_cause])
+        # This is a bounded evidence-strength score, not a probability.
+        support_score = max(0.0, min(1.0, best_similarity))
+        hypotheses = [
+            f"Past incident root cause '{hit.root_cause}' (similarity={hit.similarity:.2f})."
+            for hit in hits
+        ]
 
         return FindingPayload(
             agent_name=self.name,
             finding_type="historical_search",
             description=(
-                f"Found {len(hits)} similar past incidents. "
-                f"Top reused root cause: {best_cause or 'n/a'}."
+                f"Found {len(hits)} tenant-scoped historical match(es). "
+                f"Historical evidence points toward '{best_cause}', but does not confirm causality."
             ),
-            confidence=confidence,
+            confidence=support_score,
             evidence={
                 "hits": [
                     {
@@ -80,10 +69,17 @@ class HistoricalAnalyzerAgent(BaseAgent):
                     }
                     for h in hits
                 ],
-                "weighted_root_causes": {
-                    k: round(v, 3) for k, v in weighted_root_causes.items()
-                },
+                "support_score": round(support_score, 3),
+                "tenant_scoped": True,
             },
             root_cause_hint=best_cause,
             hypotheses=hypotheses,
+            metadata={
+                "provenance": {
+                    "source_type": "historical",
+                    "codepath": self.name,
+                    "fallback_used": False,
+                    "claim_type": "contextual_evidence",
+                }
+            },
         )
