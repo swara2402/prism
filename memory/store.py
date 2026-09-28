@@ -33,12 +33,7 @@ class MemoryHit:
 
 
 class MemoryStore:
-    """Tenant-isolated in-process vector memory.
-
-    Each tenant gets a separate store/index object. This avoids the previous
-    design where one mutable FAISS index was repeatedly switched between
-    tenants, allowing concurrent requests to observe the wrong index.
-    """
+    """Tenant-isolated in-process vector memory."""
 
     _instances: Dict[Optional[str], "MemoryStore"] = {}
 
@@ -51,8 +46,8 @@ class MemoryStore:
         self._lock = asyncio.Lock()
         self._loaded = False
         base = Path(settings.faiss_index_path)
-        # Never let two tenant indexes write the same snapshot.
-        self._index_path = base.parent / (f"{base.name}_{tenant_id or 'unscoped'}")
+        safe_scope = "unscoped" if tenant_id is None else "tenant_" + "".join(c if c.isalnum() or c in "-_" else "_" for c in tenant_id)
+        self._index_path = base.parent / f"{base.name}_{safe_scope}"
 
     @classmethod
     def get(cls, tenant_id: Optional[str] = None) -> "MemoryStore":
@@ -64,11 +59,7 @@ class MemoryStore:
     def reset(cls) -> None:
         cls._instances.clear()
 
-    async def load(self, tenant_id: Optional[str] = None) -> None:
-        """Load only memories belonging to this store's tenant."""
-        effective_tenant = self._tenant_scope if tenant_id is None else tenant_id
-        if effective_tenant != self._tenant_scope:
-            raise ValueError("MemoryStore tenant scope cannot be changed after creation")
+    async def load(self) -> None:
         async with self._lock:
             if self._loaded:
                 return
@@ -76,6 +67,10 @@ class MemoryStore:
             self._vectors.clear()
             self._meta.clear()
             self._faiss_index = None
+
+            if self._tenant_scope is None and settings.is_production:
+                self._loaded = True
+                return
 
             from database.session import AsyncSessionLocal
             async with AsyncSessionLocal() as session:
@@ -85,17 +80,12 @@ class MemoryStore:
                     .order_by(dbm.IncidentMemory.created_at.desc())
                     .limit(10_000)
                 )
-                if effective_tenant is None:
-                    # An unscoped store is deliberately empty in production.
-                    if settings.is_production:
-                        self._loaded = True
-                        return
-                else:
-                    stmt = stmt.where(dbm.Incident.tenant_id == effective_tenant)
+                if self._tenant_scope is not None:
+                    stmt = stmt.where(dbm.Incident.tenant_id == self._tenant_scope)
                 rows = (await session.execute(stmt)).all()
 
             for record, row_tenant_id in rows:
-                if effective_tenant is not None and row_tenant_id != effective_tenant:
+                if self._tenant_scope is not None and row_tenant_id != self._tenant_scope:
                     continue
                 self._ids.append(record.id)
                 self._vectors.append(_normalize_dim(list(record.embedding or []), settings.embedding_dim))
@@ -108,13 +98,9 @@ class MemoryStore:
                     "confidence": record.confidence,
                     "text_repr": record.text_repr,
                 }
-
             self._rebuild_faiss()
             self._loaded = True
-            logger.info(
-                "memory_loaded count=%d tenant=%s faiss=%s",
-                len(self._ids), effective_tenant, self._faiss_index is not None,
-            )
+            logger.info("memory_loaded count=%d tenant=%s faiss=%s", len(self._ids), self._tenant_scope, self._faiss_index is not None)
 
     def _rebuild_faiss(self) -> None:
         if not settings.enable_faiss or not self._vectors:
@@ -141,32 +127,11 @@ class MemoryStore:
             self._index_path.parent.mkdir(parents=True, exist_ok=True)
             faiss.write_index(self._faiss_index, str(self._index_path) + ".faiss")
             with open(str(self._index_path) + ".meta.json", "w", encoding="utf-8") as f:
-                json.dump(
-                    {
-                        "tenant_id": self._tenant_scope,
-                        "embedding_model": settings.sentence_transformer_model,
-                        "embedding_dim": settings.embedding_dim,
-                        "ids": self._ids,
-                        "meta": self._meta,
-                    },
-                    f,
-                    default=str,
-                )
+                json.dump({"tenant_id": self._tenant_scope, "embedding_model": settings.sentence_transformer_model, "embedding_dim": settings.embedding_dim, "ids": self._ids, "meta": self._meta}, f, default=str)
         except Exception as exc:
             logger.warning("faiss_save_failed error=%r", exc)
 
-    async def add(
-        self,
-        incident_id: str,
-        text_repr: str,
-        root_cause: str,
-        resolution: Optional[str],
-        confidence: float,
-        lessons: Sequence[str],
-        services: Sequence[str],
-        *,
-        tenant_id: Optional[str] = None,
-    ) -> str:
+    async def add(self, incident_id: str, text_repr: str, root_cause: str, resolution: Optional[str], confidence: float, lessons: Sequence[str], services: Sequence[str], *, tenant_id: Optional[str] = None) -> str:
         effective_tenant = self._tenant_scope if tenant_id is None else tenant_id
         if effective_tenant != self._tenant_scope:
             raise ValueError("MemoryStore tenant mismatch")
@@ -179,51 +144,24 @@ class MemoryStore:
             incident = await session.get(dbm.Incident, incident_id)
             if incident is None or incident.tenant_id != effective_tenant:
                 raise ValueError("Incident does not belong to the requested tenant")
-            rec = await add_memory(
-                session,
-                incident_id=incident_id,
-                text_repr=text_repr,
-                embedding=list(embedding),
-                root_cause=root_cause,
-                resolution=resolution,
-                confidence=max(0.0, min(1.0, confidence)),
-                lessons=list(lessons),
-                services=list(services),
-            )
+            rec = await add_memory(session, incident_id=incident_id, text_repr=text_repr, embedding=list(embedding), root_cause=root_cause, resolution=resolution, confidence=max(0.0, min(1.0, confidence)), lessons=list(lessons), services=list(services))
             await session.commit()
             mem_id = rec.id
 
+        if not self._loaded:
+            await self.load()
         async with self._lock:
-            if not self._loaded:
-                await self.load()
             self._ids.append(mem_id)
             self._vectors.append(_normalize_dim(list(embedding), settings.embedding_dim))
-            self._meta[mem_id] = {
-                "incident_id": incident_id,
-                "tenant_id": effective_tenant,
-                "root_cause": root_cause,
-                "resolution": resolution,
-                "services": list(services),
-                "confidence": confidence,
-                "text_repr": text_repr,
-            }
+            self._meta[mem_id] = {"incident_id": incident_id, "tenant_id": effective_tenant, "root_cause": root_cause, "resolution": resolution, "services": list(services), "confidence": confidence, "text_repr": text_repr}
             self._rebuild_faiss()
             self._save_faiss_snapshot()
         return mem_id
 
-    async def search(
-        self,
-        query: str,
-        top_k: int = 5,
-        similarity_threshold: float = 0.0,
-        *,
-        tenant_id: Optional[str] = None,
-    ) -> List[MemoryHit]:
+    async def search(self, query: str, top_k: int = 5, similarity_threshold: float = 0.0, *, tenant_id: Optional[str] = None) -> List[MemoryHit]:
         effective_tenant = self._tenant_scope if tenant_id is None else tenant_id
         if effective_tenant != self._tenant_scope:
-            return await self.get(effective_tenant).search(
-                query, top_k=top_k, similarity_threshold=similarity_threshold
-            )
+            return await self.get(effective_tenant).search(query, top_k=top_k, similarity_threshold=similarity_threshold)
         if effective_tenant is None and settings.is_production:
             raise ValueError("Tenant context is required for production memory search")
         if not self._loaded:
@@ -236,23 +174,14 @@ class MemoryStore:
                 try:
                     q = np.array([q_vec], dtype=np.float32)
                     scores, indices = self._faiss_index.search(q, min(top_k, len(self._ids)))
-                    return [
-                        self._hit(float(score), self._ids[idx])
-                        for score, idx in zip(scores[0], indices[0])
-                        if idx >= 0 and score >= similarity_threshold
-                    ]
+                    return [self._hit(float(score), self._ids[idx]) for score, idx in zip(scores[0], indices[0]) if idx >= 0 and score >= similarity_threshold]
                 except Exception as exc:
                     logger.warning("faiss_search_failed error=%r", exc)
             return self._cosine_search(q_vec, top_k, similarity_threshold)
 
     def _hit(self, similarity: float, mem_id: str) -> MemoryHit:
         m = self._meta[mem_id]
-        return MemoryHit(
-            incident_id=m["incident_id"], similarity=similarity,
-            root_cause=m["root_cause"], resolution=m["resolution"],
-            services=m["services"], confidence=m["confidence"],
-            text_repr=m["text_repr"], tenant_id=m.get("tenant_id"),
-        )
+        return MemoryHit(incident_id=m["incident_id"], similarity=similarity, root_cause=m["root_cause"], resolution=m["resolution"], services=m["services"], confidence=m["confidence"], text_repr=m["text_repr"], tenant_id=m.get("tenant_id"))
 
     def _cosine_search(self, q_vec: List[float], top_k: int, similarity_threshold: float) -> List[MemoryHit]:
         q = np.array(q_vec, dtype=np.float32)
