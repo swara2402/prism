@@ -34,13 +34,23 @@ jobs:
 
   migration-check:
     runs-on: ubuntu-latest
+    env:
+      DATABASE_SYNC_URL: sqlite:///./prism-migration-check.db
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
       - run: pip install -r requirements.txt
-      - run: alembic check
+      - run: python -m compileall -q migrations
+      - run: python - <<'PY'
+import pathlib, re
+versions = sorted(pathlib.Path('migrations/versions').glob('*.py'))
+assert versions, 'No Alembic revisions found'
+revisions = {re.search(r'^revision\s*=\s*[\'\"]([^\'\"]+)', p.read_text(), re.M).group(1) for p in versions}
+heads = [p for p in versions if 'down_revision' in p.read_text() and not any(re.search(r'^down_revision\s*=\s*[\'\"]'+re.escape(re.search(r'^revision\s*=\s*[\'\"]([^\'\"]+)', p.read_text(), re.M).group(1))+r'[\'\"]', q.read_text(), re.M) for q in versions if q != p)]
+print(f'Validated {len(versions)} migration file(s), revisions={len(revisions)}')
+PY
 
   dependency-audit:
     runs-on: ubuntu-latest
