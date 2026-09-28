@@ -40,7 +40,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     logger.info("app_startup", extra={"env": settings.app_env, "host": settings.app_host, "port": settings.app_port})
     await init_db()
     await bootstrap_owner()
-    # Memory is deliberately NOT loaded globally.  FAISS indexes are tenant
+    # Memory is deliberately NOT loaded globally. FAISS indexes are tenant
     # scoped and are hydrated lazily by the historical analyzer.
     KnowledgeGraphStore.get()
     worker_task = None
@@ -185,6 +185,18 @@ async def ui_root(request: Request):
     if not request.cookies.get(COOKIE_NAME):
         return RedirectResponse("/login", status_code=303)
     return FileResponse(STATIC_DIR / "index.html")
+
+
+@app.get("/static/app.js", include_in_schema=False)
+async def ui_bundle() -> Response:
+    """Serve the existing console bundle with the session bridge prepended.
+
+    Keeping the bridge at the HTTP boundary lets us preserve the large legacy
+    console bundle while migrating browser authentication away from API keys.
+    """
+    legacy = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    bridge = (STATIC_DIR / "session-bridge.js").read_text(encoding="utf-8")
+    return Response(bridge + "\n" + legacy, media_type="application/javascript")
 
 
 @app.get("/api/info", tags=["meta"])
