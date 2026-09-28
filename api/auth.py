@@ -1,15 +1,16 @@
 """Human login/session and workspace membership endpoints."""
 from __future__ import annotations
-import secrets
-from fastapi import APIRouter,HTTPException,Request,Response
+from fastapi import APIRouter,HTTPException,Request,Response,status
 from pydantic import BaseModel,Field
 from sqlalchemy import select
 from auth.security import COOKIE_NAME,authenticate_login,create_access_token,hash_password,principal_from_request
 from config.settings import settings
 from database.auth_models import User,Tenant
 from database.session import AsyncSessionLocal
+from utils.rate_limit import build_rate_limiter
 
 router=APIRouter(prefix="/auth",tags=["auth"])
+_login_limiter=build_rate_limiter("5/minute",settings.redis_url)
 class LoginRequest(BaseModel):
     email:str=Field(min_length=3,max_length=320); password:str=Field(min_length=1,max_length=256)
 class MemberCreate(BaseModel):
@@ -17,8 +18,11 @@ class MemberCreate(BaseModel):
 class RoleUpdate(BaseModel): role:str
 
 @router.post("/login")
-async def login(body:LoginRequest,response:Response)->dict:
+async def login(body:LoginRequest,request:Request,response:Response)->dict:
     if "@" not in body.email: raise HTTPException(422,"Enter a valid email address")
+    ip=request.client.host if request.client else "unknown"
+    allowed,retry=await _login_limiter.check(f"login:{ip}")
+    if not allowed: raise HTTPException(429,"Too many sign-in attempts. Try again shortly.",headers={"Retry-After":str(max(1,int(retry+0.999)))})
     principal=await authenticate_login(body.email,body.password)
     if not principal: raise HTTPException(401,"Email or password is incorrect")
     async with AsyncSessionLocal() as session:
@@ -39,8 +43,7 @@ async def me(request:Request)->dict:
 async def members(request:Request)->list[dict]:
     p=await principal_from_request(request)
     if not p.can("admin"): raise HTTPException(403,"Admin permission required")
-    async with AsyncSessionLocal() as session:
-        rows=(await session.execute(select(User).where(User.tenant_id==p.tenant_id).order_by(User.email))).scalars().all()
+    async with AsyncSessionLocal() as session: rows=(await session.execute(select(User).where(User.tenant_id==p.tenant_id).order_by(User.email))).scalars().all()
     return [{"id":u.id,"email":u.email,"role":u.role,"active":u.is_active} for u in rows]
 
 @router.post("/members")
