@@ -1,4 +1,4 @@
-"""PRISM application entry point."""
+"""WayPoint application entry point."""
 from __future__ import annotations
 
 import asyncio
@@ -40,8 +40,6 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     logger.info("app_startup", extra={"env": settings.app_env, "host": settings.app_host, "port": settings.app_port})
     await init_db()
     await bootstrap_owner()
-    # Memory is deliberately NOT loaded globally. FAISS indexes are tenant
-    # scoped and are hydrated lazily by the historical analyzer.
     KnowledgeGraphStore.get()
     worker_task = None
     if settings.job_worker_enabled:
@@ -73,7 +71,7 @@ _docs_url = None if settings.is_production else "/docs"
 _redoc_url = None if settings.is_production else "/redoc"
 _openapi_url = None if settings.is_production else "/openapi.json"
 app = FastAPI(
-    title="PRISM — Incident Intelligence",
+    title="WayPoint — Incident Intelligence",
     version="2.0.0",
     docs_url=_docs_url,
     redoc_url=_redoc_url,
@@ -139,7 +137,7 @@ app.include_router(predictions_router)
 
 @app.get("/health", tags=["meta"])
 async def health() -> dict:
-    return {"status": "ok", "version": "2.0.0"}
+    return {"status": "ok", "version": "2.0.0", "service": "WayPoint"}
 
 
 @app.get("/internal/health", tags=["meta"])
@@ -150,6 +148,7 @@ async def internal_health(_api_key: str = Depends(require_api_key)) -> dict:
         "status": "ok",
         "env": settings.app_env,
         "version": "2.0.0",
+        "service": "WayPoint",
         "memory_scope": "tenant-bound-lazy",
         "memory_size": memory_store.size(),
         "subsystems": {
@@ -189,11 +188,7 @@ async def ui_root(request: Request):
 
 @app.get("/static/app.js", include_in_schema=False)
 async def ui_bundle() -> Response:
-    """Serve the existing console bundle with the session bridge prepended.
-
-    Keeping the bridge at the HTTP boundary lets us preserve the large legacy
-    console bundle while migrating browser authentication away from API keys.
-    """
+    """Serve the existing console bundle with the session bridge prepended."""
     legacy = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
     bridge = (STATIC_DIR / "session-bridge.js").read_text(encoding="utf-8")
     return Response(bridge + "\n" + legacy, media_type="application/javascript")
@@ -202,10 +197,10 @@ async def ui_bundle() -> Response:
 @app.get("/api/info", tags=["meta"])
 async def service_info(_api_key: str = Depends(require_api_key)) -> dict:
     return {
-        "name": "PRISM — Incident Intelligence",
+        "name": "WayPoint — Incident Intelligence",
         "version": "2.0.0",
         "docs": "/docs" if not settings.is_production else None,
-        "auth": "PRISM session cookie or tenant-bound service account",
+        "auth": "WayPoint session cookie or tenant-bound service account",
         "epistemic_model": ["observed", "evidence", "inference", "confirmed"],
     }
 
