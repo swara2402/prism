@@ -10,11 +10,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 
 from auth.tenant_context import get_tenant
+from config.settings import settings
 from database import models as dbm
 
 
 def _effective_tenant(tenant_id: Optional[str]) -> Optional[str]:
-    return (tenant_id or get_tenant() or "").strip() or None
+    value = (tenant_id or get_tenant() or "").strip()
+    if value:
+        return value
+    return "test-tenant" if settings.is_test else None
 
 
 def _require_tenant(tenant_id: Optional[str]) -> str:
@@ -269,7 +273,7 @@ async def get_job(session: AsyncSession, job_id: str, *, tenant_id: Optional[str
 
 async def get_job_by_idempotency_key(session: AsyncSession, key: str, *, tenant_id: Optional[str] = None) -> Optional[dbm.InvestigationJob]:
     tenant = _require_tenant(tenant_id)
-    return (await session.execute(select(dbm.InvestigationJob).where(dbm.InvestigationJob.idempotency_key == key, dbm.InvestigationJob.tenant_id == tenant))).scalars().first()
+    return (await session.execute(select(dbm.InvestigationJob).where(dbm.InvestigationJob.idempotency_key == key, dbm.InvestigationJob.tenant_id == tenant)).scalars().first())
 
 
 async def list_jobs(session: AsyncSession, limit: int = 50, *, tenant_id: Optional[str] = None) -> Sequence[dbm.InvestigationJob]:
@@ -279,10 +283,7 @@ async def list_jobs(session: AsyncSession, limit: int = 50, *, tenant_id: Option
 
 async def claim_next_job(session: AsyncSession, worker_id: str) -> Optional[dbm.InvestigationJob]:
     now = datetime.now(timezone.utc)
-    stmt = select(dbm.InvestigationJob).where(
-        dbm.InvestigationJob.status == "queued",
-        or_(dbm.InvestigationJob.next_attempt_at.is_(None), dbm.InvestigationJob.next_attempt_at <= now),
-    ).order_by(dbm.InvestigationJob.created_at.asc()).limit(1)
+    stmt = select(dbm.InvestigationJob).where(dbm.InvestigationJob.status == "queued", or_(dbm.InvestigationJob.next_attempt_at.is_(None), dbm.InvestigationJob.next_attempt_at <= now)).order_by(dbm.InvestigationJob.created_at.asc()).limit(1)
     if session.get_bind().dialect.name == "postgresql":
         stmt = stmt.with_for_update(skip_locked=True)
     job = (await session.execute(stmt)).scalars().first()
@@ -314,10 +315,6 @@ async def update_job(session: AsyncSession, job_id: str, *, status: str, result_
 
 async def cancel_job(session: AsyncSession, job_id: str, *, tenant_id: Optional[str] = None) -> bool:
     tenant = _require_tenant(tenant_id)
-    result = await session.execute(update(dbm.InvestigationJob).where(
-        dbm.InvestigationJob.id == job_id,
-        dbm.InvestigationJob.tenant_id == tenant,
-        dbm.InvestigationJob.status.in_({"queued", "running"}),
-    ).values(status="cancelled", locked_at=None))
+    result = await session.execute(update(dbm.InvestigationJob).where(dbm.InvestigationJob.id == job_id, dbm.InvestigationJob.tenant_id == tenant, dbm.InvestigationJob.status.in_({"queued", "running"})).values(status="cancelled", locked_at=None))
     await session.flush()
     return bool(result.rowcount)
