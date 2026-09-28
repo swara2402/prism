@@ -1,0 +1,30 @@
+[
+  {
+    "id": "db-pool-exhaustion-001",
+    "title": "API requests timing out",
+    "description": "Checkout API latency increased sharply and requests are timing out.",
+    "affected_services": ["checkout-api", "postgres"],
+    "logs": [
+      "ERROR checkout-api database connection pool exhausted",
+      "ERROR checkout-api timeout acquiring database connection",
+      "ERROR postgres too many clients"
+    ],
+    "metrics": {
+      "db_connection_utilization": [0.92, 0.96, 0.99],
+      "checkout_latency_ms": [120, 1800, 2200]
+    },
+    "ground_truth": "database connection pool exhaustion"
+  },
+  {
+    "id": "certificate-expiry-001",
+    "title": "payments TLS failures",
+    "description": "Payments requests began failing with TLS certificate errors.",
+    "affected_services": ["payments-api"],
+    "logs": [
+      "ERROR x509 certificate has expired",
+      "ERROR TLS handshake failed"
+    ],
+    "metrics": {"payments_error_rate": [0.01, 0.72, 0.81]},
+    "ground_truth": "expired certificate"
+  }
+]

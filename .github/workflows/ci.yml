@@ -1,0 +1,63 @@
+name: PRISM CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      APP_ENV: test
+      DATABASE_URL: sqlite+aiosqlite:///./prism-ci.db
+      DATABASE_SYNC_URL: sqlite:///./prism-ci.db
+      PRISM_JWT_SECRET: test-only-jwt-secret-012345678901234567890123
+      API_KEY: test-only-api-key
+      ENABLE_NEO4J: "false"
+      ENABLE_OLLAMA: "false"
+      ENABLE_FAISS: "false"
+      LEARNING_MODE: frozen
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: python -m pip install --upgrade pip
+      - run: pip install -r requirements.txt
+      - run: python -m compileall -q .
+      - run: pytest -q
+
+  migration-check:
+    runs-on: ubuntu-latest
+    env:
+      DATABASE_SYNC_URL: sqlite:///./prism-migration-check.db
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt
+      - run: python -m compileall -q migrations
+      - run: python - <<'PY'
+import pathlib, re
+versions = sorted(pathlib.Path('migrations/versions').glob('*.py'))
+assert versions, 'No Alembic revisions found'
+revisions = {re.search(r'^revision\s*=\s*[\'\"]([^\'\"]+)', p.read_text(), re.M).group(1) for p in versions}
+heads = [p for p in versions if 'down_revision' in p.read_text() and not any(re.search(r'^down_revision\s*=\s*[\'\"]'+re.escape(re.search(r'^revision\s*=\s*[\'\"]([^\'\"]+)', p.read_text(), re.M).group(1))+r'[\'\"]', q.read_text(), re.M) for q in versions if q != p)]
+print(f'Validated {len(versions)} migration file(s), revisions={len(revisions)}')
+PY
+
+  dependency-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pip-audit
+      - run: pip-audit -r requirements.txt
