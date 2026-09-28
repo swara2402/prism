@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Sign in · PRISM</title>
+  <style>
+    :root{font-family:Inter,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#080b12;color:#eef2f7}
+    *{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;background:radial-gradient(circle at 50% 10%,#182235 0,#080b12 55%)}
+    .card{width:min(440px,calc(100% - 32px));padding:34px;border:1px solid #263143;border-radius:20px;background:#0d121b;box-shadow:0 30px 80px #0008}
+    .mark{display:flex;align-items:center;gap:12px;margin-bottom:28px}.logo{width:38px;height:38px;border-radius:11px;background:#7c5cff;display:grid;place-items:center;font-weight:800}.eyebrow{font-size:12px;letter-spacing:.14em;text-transform:uppercase;color:#8d99aa}.title{font-size:29px;font-weight:750;margin:8px 0}.sub{color:#929dad;line-height:1.55;margin-bottom:26px}
+    label{display:block;font-size:13px;color:#b7c0ce;margin:16px 0 7px}input{width:100%;padding:13px 14px;border-radius:10px;border:1px solid #303b4d;background:#080d15;color:#fff;font-size:15px;outline:none}input:focus{border-color:#7c5cff;box-shadow:0 0 0 3px #7c5cff22}
+    button{width:100%;margin-top:22px;padding:13px;border:0;border-radius:10px;background:#7c5cff;color:#fff;font-size:15px;font-weight:700;cursor:pointer}button:disabled{opacity:.6;cursor:wait}.error{display:none;margin-top:16px;padding:11px 13px;border-radius:9px;background:#3a1820;color:#ffb8c0;font-size:13px}.help{margin-top:22px;color:#727e90;font-size:12px;line-height:1.5}
+  </style>
+</head>
+<body>
+  <main class="card">
+    <div class="mark"><div class="logo">P</div><div><div class="eyebrow">PRISM</div><div>Incident Intelligence</div></div></div>
+    <div class="title">Welcome back.</div>
+    <div class="sub">Sign in to investigate incidents, inspect evidence, and collaborate with your workspace.</div>
+    <form id="login-form">
+      <label for="email">Work email</label><input id="email" type="email" autocomplete="username" required placeholder="you@company.com">
+      <label for="password">Password</label><input id="password" type="password" autocomplete="current-password" required placeholder="Your password">
+      <button id="submit" type="submit">Sign in to PRISM</button>
+      <div class="error" id="error" role="alert"></div>
+    </form>
+    <div class="help">Your session is stored in a secure HttpOnly cookie. PRISM does not ask you to paste an API key into the browser.</div>
+  </main>
+  <script>
+    const form=document.getElementById('login-form'),btn=document.getElementById('submit'),err=document.getElementById('error');
+    form.addEventListener('submit',async e=>{e.preventDefault();btn.disabled=true;err.style.display='none';
+      try{const r=await fetch('/auth/login',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'same-origin',body:JSON.stringify({email:document.getElementById('email').value,password:document.getElementById('password').value})});
+        const d=await r.json().catch(()=>({}));if(!r.ok)throw new Error(d.detail||'Sign-in failed');location.replace('/');
+      }catch(x){err.textContent=x.message;err.style.display='block';btn.disabled=false;}
+    });
+  </script>
+</body>
+</html>
