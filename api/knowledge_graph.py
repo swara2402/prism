@@ -2,21 +2,16 @@
 api.knowledge_graph
 ===================
 
-Endpoints for the Enterprise Knowledge Graph (Neo4j-backed).
-
-* POST /kg/services               - upsert a service
-* POST /kg/services/{name}/depends-on/{dep}  - record dependency
-* POST /kg/changes                - record a recent change
-* GET  /kg/services/subgraph      - fetch subgraph for affected services
+Authenticated endpoints for the Enterprise Knowledge Graph.
 """
 from __future__ import annotations
 
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends
-from api.deps import require_api_key
-from pydantic import BaseModel
+from fastapi import APIRouter, Depends, HTTPException, Path, Query
+from pydantic import BaseModel, Field
 
+from api.deps import require_api_key
 from knowledge_graph.store import KnowledgeGraphStore
 
 router = APIRouter(
@@ -27,47 +22,56 @@ router = APIRouter(
 
 
 class ServiceIn(BaseModel):
-    name: str
-    team: Optional[str] = None
-    tier: Optional[str] = None
+    name: str = Field(min_length=1, max_length=200)
+    team: Optional[str] = Field(default=None, max_length=200)
+    tier: Optional[str] = Field(default=None, max_length=50)
 
 
 class ApiIn(BaseModel):
-    path: str
-    method: str = "GET"
-    service: Optional[str] = None
+    path: str = Field(min_length=1, max_length=500)
+    method: str = Field(default="GET", min_length=1, max_length=10)
+    service: Optional[str] = Field(default=None, max_length=200)
 
 
 class ChangeIn(BaseModel):
-    service: str
-    change_type: str
-    timestamp: Optional[str] = None
-    description: str = ""
+    service: str = Field(min_length=1, max_length=200)
+    change_type: str = Field(min_length=1, max_length=100)
+    timestamp: Optional[str] = Field(default=None, max_length=100)
+    description: str = Field(default="", max_length=5000)
 
 
 class SubgraphRequest(BaseModel):
-    services: List[str]
+    services: List[str] = Field(min_length=1, max_length=50)
 
 
 @router.post("/services")
 async def upsert_service(body: ServiceIn) -> dict:
     store = KnowledgeGraphStore.get()
     await store.upsert_service(body.name, team=body.team, tier=body.tier)
-    return {"ok": True}
+    return {"ok": True, "service": body.name}
 
 
 @router.post("/apis")
 async def upsert_api(body: ApiIn) -> dict:
+    method = body.method.upper()
+    if method not in {"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"}:
+        raise HTTPException(422, "Unsupported HTTP method")
     store = KnowledgeGraphStore.get()
-    await store.upsert_api(body.path, body.method, body.service)
-    return {"ok": True}
+    await store.upsert_api(body.path, method, body.service)
+    return {"ok": True, "path": body.path, "method": method}
 
 
 @router.post("/services/{name}/depends-on/{dep}")
-async def add_dependency(name: str, dep: str, weight: float = 1.0) -> dict:
+async def add_dependency(
+    name: str = Path(min_length=1, max_length=200),
+    dep: str = Path(min_length=1, max_length=200),
+    weight: float = Query(default=1.0, ge=0.0, le=1.0),
+) -> dict:
+    if name == dep:
+        raise HTTPException(422, "A service cannot depend on itself")
     store = KnowledgeGraphStore.get()
     await store.link_service_dependency(name, dep, weight=weight)
-    return {"ok": True}
+    return {"ok": True, "from": name, "to": dep, "weight": weight}
 
 
 @router.post("/changes")
@@ -84,5 +88,8 @@ async def record_change(body: ChangeIn) -> dict:
 
 @router.post("/services/subgraph")
 async def subgraph(body: SubgraphRequest) -> dict:
+    services = [s.strip() for s in body.services if s.strip()]
+    if not services:
+        raise HTTPException(422, "At least one service is required")
     store = KnowledgeGraphStore.get()
-    return await store.query_service_subgraph(body.services)
+    return await store.query_service_subgraph(services[:50])
