@@ -22,6 +22,11 @@ def _constant_time_compare(a: str, b: str) -> bool:
 
 
 def _inject_tenant_header(request: Request, tenant_id: str) -> None:
+    """Replace any client tenant header with the authenticated tenant.
+
+    This exists only for backwards-compatible handlers that still declare an
+    X-Tenant-Id header. The header is never an authority source.
+    """
     headers = list(request.scope.get("headers", []))
     headers = [(k, v) for k, v in headers if k.lower() != b"x-tenant-id"]
     headers.append((b"x-tenant-id", tenant_id.encode("utf-8")))
@@ -34,7 +39,11 @@ async def _service_account_principal(token: str) -> Optional[Principal]:
         result = await session.execute(
             select(ServiceAccount, Tenant)
             .join(Tenant, Tenant.id == ServiceAccount.tenant_id)
-            .where(ServiceAccount.token_hash == token_hash, ServiceAccount.is_active.is_(True), Tenant.is_active.is_(True))
+            .where(
+                ServiceAccount.token_hash == token_hash,
+                ServiceAccount.is_active.is_(True),
+                Tenant.is_active.is_(True),
+            )
         )
         row = result.first()
         if not row:
@@ -45,14 +54,24 @@ async def _service_account_principal(token: str) -> Optional[Principal]:
             return None
         account.last_used_at = now
         await session.commit()
-        return Principal(user_id=f"service:{account.id}", email=f"service:{account.name}", tenant_id=account.tenant_id, role=account.role, tenant_name=tenant.name)
+        return Principal(
+            user_id=f"service:{account.id}",
+            email=f"service:{account.name}",
+            tenant_id=account.tenant_id,
+            role=account.role,
+            tenant_name=tenant.name,
+        )
 
 
 async def require_api_key(
     request: Request,
     x_api_key: Optional[str] = Header(default=None, alias="X-API-Key"),
 ) -> str:
-    """Authenticate a human session or tenant-bound machine credential."""
+    """Authenticate a human session or tenant-bound machine credential.
+
+    Tenant identity is derived only from the authenticated principal. A
+    client-supplied X-Tenant-Id is deliberately ignored/overwritten.
+    """
     try:
         principal = await principal_from_request(request)
     except HTTPException as session_error:
