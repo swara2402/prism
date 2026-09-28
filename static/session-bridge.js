@@ -26,6 +26,26 @@
     document.querySelectorAll(".brand-sub").forEach(el => { el.textContent = "INCIDENT INTELLIGENCE"; });
   }
 
+  function mountStyles() {
+    if (document.querySelector("#waypoint-session-styles")) return;
+    const style = document.createElement("style");
+    style.id = "waypoint-session-styles";
+    style.textContent = `
+      #waypoint-epistemic-legend{display:flex;gap:10px;align-items:stretch;flex-wrap:wrap;margin:0 0 14px;padding:11px 13px;border:1px solid var(--border,#263143);border-radius:12px;background:var(--panel,#0d121b);font-size:11px}
+      #waypoint-epistemic-legend>span{display:flex;flex-direction:column;gap:2px;padding-right:12px;border-right:1px solid var(--border,#263143)}
+      #waypoint-epistemic-legend>span:last-child{border-right:0}
+      #waypoint-epistemic-legend .wp-legend-title{justify-content:center;color:var(--muted,#8d99aa);font-size:10px;letter-spacing:.08em;font-weight:700}
+      #waypoint-epistemic-legend b{color:var(--text,#eef2f7)}
+      #waypoint-epistemic-legend small{color:var(--muted,#8d99aa)}
+      #waypoint-session{display:flex;align-items:center;gap:8px;margin-right:8px}
+      .prism-session-copy{display:flex;flex-direction:column;text-align:right;line-height:1.2}
+      .prism-session-copy b{font-size:11px}
+      .prism-session-copy small{font-size:10px;color:var(--muted,#8d99aa)}
+      @media(max-width:760px){#waypoint-epistemic-legend .wp-legend-title{width:100%;align-items:flex-start}#waypoint-epistemic-legend>span{flex:1;min-width:120px}.prism-session-copy{display:none}}
+    `;
+    document.head.appendChild(style);
+  }
+
   function mountEpistemicLegend() {
     if (document.querySelector("#waypoint-epistemic-legend")) return;
     const content = document.querySelector(".content");
@@ -44,6 +64,7 @@
 
   async function mountSession() {
     applyBranding();
+    mountStyles();
     mountEpistemicLegend();
     try {
       const response = await nativeFetch("/auth/me", { credentials: "same-origin", cache: "no-store" });
