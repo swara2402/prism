@@ -2,16 +2,13 @@
 api.memory
 ==========
 
-Endpoints for the Incident Memory store:
-
-* POST /memory/search   - semantic search over past incidents
-* GET  /memory/stats    - index size + backend info
+Tenant-scoped endpoints for incident memory.
 """
 from __future__ import annotations
 
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException, Request
 from api.deps import require_api_key
 from config.settings import settings
 from pydantic import BaseModel, Field
@@ -39,16 +36,20 @@ class SearchHit(BaseModel):
 @router.post("/search", response_model=List[SearchHit])
 async def search_memory(
     body: SearchRequest,
+    request: Request,
     _api_key: str = Depends(require_api_key),
 ) -> List[SearchHit]:
-    if len(body.query) > 2000:
-        from fastapi import HTTPException
-        raise HTTPException(422, "query too long (max 2000 characters)")
-    store = MemoryStore.get()
+    if len(body.query) > settings.max_memory_query_length:
+        raise HTTPException(422, f"query too long (max {settings.max_memory_query_length} characters)")
+    tenant_id = getattr(request.state, "tenant_id", None)
+    if not tenant_id:
+        raise HTTPException(403, "Tenant context is required")
+    store = MemoryStore.get(tenant_id=tenant_id)
     hits = await store.search(
         body.query,
         top_k=body.top_k,
         similarity_threshold=body.similarity_threshold,
+        tenant_id=tenant_id,
     )
     return [
         SearchHit(
@@ -64,9 +65,16 @@ async def search_memory(
 
 
 @router.get("/stats")
-async def memory_stats(_api_key: str = Depends(require_api_key)) -> dict:
-    store = MemoryStore.get()
+async def memory_stats(
+    request: Request,
+    _api_key: str = Depends(require_api_key),
+) -> dict:
+    tenant_id = getattr(request.state, "tenant_id", None)
+    if not tenant_id:
+        raise HTTPException(403, "Tenant context is required")
+    store = MemoryStore.get(tenant_id=tenant_id)
     return {
         "size": store.size(),
         "faiss_enabled": store._faiss_index is not None,
+        "tenant_scoped": True,
     }
