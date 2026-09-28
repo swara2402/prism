@@ -248,7 +248,7 @@ async def save_prediction(session: AsyncSession, **kwargs: Any) -> dbm.Predictio
 
 
 async def list_predictions(session: AsyncSession, limit: int = 50) -> Sequence[dbm.Prediction]:
-    return (await session.execute(select(dbm.Prediction).order_by(dbm.Prediction.updated_at.desc()).limit(limit))).scalars().all()
+    return (await session.execute(select(dbm.Prediction).order_by(dbm.Prediction.updated_at.desc().limit(limit))).scalars().all())
 
 
 async def save_meta_reasoning(session: AsyncSession, **kwargs: Any) -> dbm.MetaReasoningRecord:
@@ -273,12 +273,13 @@ async def get_job(session: AsyncSession, job_id: str, *, tenant_id: Optional[str
 
 async def get_job_by_idempotency_key(session: AsyncSession, key: str, *, tenant_id: Optional[str] = None) -> Optional[dbm.InvestigationJob]:
     tenant = _require_tenant(tenant_id)
-    return (await session.execute(select(dbm.InvestigationJob).where(dbm.InvestigationJob.idempotency_key == key, dbm.InvestigationJob.tenant_id == tenant)).scalars().first())
+    res = await session.execute(select(dbm.InvestigationJob).where(dbm.InvestigationJob.idempotency_key == key, dbm.InvestigationJob.tenant_id == tenant))
+    return res.scalars().first()
 
 
 async def list_jobs(session: AsyncSession, limit: int = 50, *, tenant_id: Optional[str] = None) -> Sequence[dbm.InvestigationJob]:
     tenant = _require_tenant(tenant_id)
-    return (await session.execute(select(dbm.InvestigationJob).where(dbm.InvestigationJob.tenant_id == tenant).order_by(dbm.InvestigationJob.created_at.desc()).limit(limit))).scalars().all()
+    return (await session.execute(select(dbm.InvestigationJob).where(dbm.InvestigationJob.tenant_id == tenant).order_by(dbm.InvestigationJob.created_at.desc().limit(limit)))).scalars().all()
 
 
 async def claim_next_job(session: AsyncSession, worker_id: str) -> Optional[dbm.InvestigationJob]:
