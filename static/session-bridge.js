@@ -84,13 +84,18 @@
           parent.appendChild(banner);
         }
       });
-      document.querySelectorAll("[data-confidence]").forEach(el => {
-        const value = Number(el.getAttribute("data-confidence"));
-        if (!Number.isFinite(value)) el.textContent = "Not available";
-      });
     };
     scan();
     new MutationObserver(scan).observe(root, {subtree:true, childList:true, characterData:true});
+  }
+
+  function loadConsolePatch() {
+    if (document.querySelector('script[data-waypoint-console-patch]')) return;
+    const script = document.createElement("script");
+    script.src = "/static/waypoint-console-patch.js";
+    script.dataset.waypointConsolePatch = "true";
+    script.async = false;
+    document.head.appendChild(script);
   }
 
   async function mountSession() {
@@ -107,23 +112,25 @@
       applyBranding();
       mountEpistemicLegend();
       const actions = document.querySelector("#topbar-actions");
-      if (!actions || document.querySelector("#waypoint-session")) return;
-      const user = session.user || {};
-      const tenant = session.tenant || {};
-      const wrap = document.createElement("div");
-      wrap.id = "waypoint-session";
-      wrap.innerHTML = `<span class="prism-session-copy"><b>${esc(user.email || "User")}</b><small>${esc(tenant.name || "Workspace")} · ${esc(user.role || "viewer")}</small></span><button class="icon-btn" id="prism-logout" type="button" title="Sign out" aria-label="Sign out">↪</button>`;
-      actions.prepend(wrap);
-      const settingsButton = document.querySelector("#btn-settings");
-      if (settingsButton) settingsButton.style.display = "none";
-      document.querySelector("#prism-logout")?.addEventListener("click", async () => {
-        try { await nativeFetch("/auth/logout", { method: "POST", credentials: "same-origin" }); }
-        finally { window.location.replace("/login"); }
-      });
+      if (actions && !document.querySelector("#waypoint-session")) {
+        const user = session.user || {};
+        const tenant = session.tenant || {};
+        const wrap = document.createElement("div");
+        wrap.id = "waypoint-session";
+        wrap.innerHTML = `<span class="prism-session-copy"><b>${esc(user.email || "User")}</b><small>${esc(tenant.name || "Workspace")} · ${esc(user.role || "viewer")}</small></span><button class="icon-btn" id="prism-logout" type="button" title="Sign out" aria-label="Sign out">↪</button>`;
+        actions.prepend(wrap);
+        const settingsButton = document.querySelector("#btn-settings");
+        if (settingsButton) settingsButton.style.display = "none";
+        document.querySelector("#prism-logout")?.addEventListener("click", async () => {
+          try { await nativeFetch("/auth/logout", { method: "POST", credentials: "same-origin" }); }
+          finally { window.location.replace("/login"); }
+        });
+      }
     } catch (_) {
       window.location.replace("/login");
     }
   }
 
+  window.addEventListener("load", loadConsolePatch, { once: true });
   document.addEventListener("DOMContentLoaded", mountSession, { once: true });
 })();
