@@ -1,18 +1,12 @@
 """Secure local authentication, JWT sessions, RBAC and tenant context."""
 from __future__ import annotations
-
-import hashlib
-import hmac
-import os
-import secrets
+import hashlib, hmac, os, secrets
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Optional
-
 import jwt
 from fastapi import HTTPException, Request, status
 from sqlalchemy import select
-
 from config.settings import settings
 from database.auth_models import Tenant, User
 from database.session import AsyncSessionLocal
@@ -20,20 +14,17 @@ from database.session import AsyncSessionLocal
 ALGORITHM = "HS256"
 COOKIE_NAME = "prism_session"
 ROLE_ORDER = {"viewer": 10, "engineer": 20, "admin": 30, "owner": 40}
+JWT_SECRET = os.getenv("PRISM_JWT_SECRET", "")
+SESSION_HOURS = max(1, int(os.getenv("PRISM_SESSION_HOURS", "8")))
 
 @dataclass(frozen=True)
 class Principal:
-    user_id: str
-    email: str
-    tenant_id: str
-    role: str
-    tenant_name: str
+    user_id: str; email: str; tenant_id: str; role: str; tenant_name: str
     def can(self, role: str) -> bool:
         return ROLE_ORDER.get(self.role, 0) >= ROLE_ORDER.get(role, 999)
 
 def hash_password(password: str, salt: Optional[bytes] = None) -> str:
-    if len(password) < 12:
-        raise ValueError("Password must be at least 12 characters")
+    if len(password) < 12: raise ValueError("Password must be at least 12 characters")
     salt = salt or os.urandom(16)
     digest = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, 310_000)
     return f"pbkdf2_sha256$310000${salt.hex()}${digest.hex()}"
@@ -44,18 +35,21 @@ def verify_password(password: str, encoded: str) -> bool:
         if scheme != "pbkdf2_sha256": return False
         digest = hashlib.pbkdf2_hmac("sha256", password.encode(), bytes.fromhex(salt_hex), int(rounds))
         return hmac.compare_digest(digest.hex(), digest_hex)
-    except (ValueError, TypeError):
-        return False
+    except (ValueError, TypeError): return False
+
+def _jwt_secret() -> str:
+    if not JWT_SECRET or len(JWT_SECRET) < 32:
+        raise RuntimeError("PRISM_JWT_SECRET must be configured with at least 32 random characters")
+    return JWT_SECRET
 
 def create_access_token(user: User, tenant: Tenant) -> str:
     now = datetime.now(timezone.utc)
     payload = {"sub": user.id, "email": user.email, "tenant_id": user.tenant_id, "role": user.role,
-               "tenant_name": tenant.name, "iat": now,
-               "exp": now + timedelta(hours=settings.auth_session_hours), "jti": secrets.token_hex(16)}
-    return jwt.encode(payload, settings.jwt_secret, algorithm=ALGORITHM)
+               "tenant_name": tenant.name, "iat": now, "exp": now + timedelta(hours=SESSION_HOURS), "jti": secrets.token_hex(16)}
+    return jwt.encode(payload, _jwt_secret(), algorithm=ALGORITHM)
 
 def decode_access_token(token: str) -> dict:
-    return jwt.decode(token, settings.jwt_secret, algorithms=[ALGORITHM])
+    return jwt.decode(token, _jwt_secret(), algorithms=[ALGORITHM])
 
 async def authenticate_login(email: str, password: str) -> Optional[Principal]:
     async with AsyncSessionLocal() as session:
@@ -72,15 +66,11 @@ async def principal_from_request(request: Request) -> Principal:
     if not token:
         auth = request.headers.get("Authorization", "")
         if auth.lower().startswith("bearer "): token = auth[7:].strip()
-    if not token:
-        raise HTTPException(status_code=401, detail="Please sign in to PRISM", headers={"WWW-Authenticate": "Bearer"})
-    try:
-        claims = decode_access_token(token)
-    except jwt.PyJWTError:
-        raise HTTPException(status_code=401, detail="Your PRISM session has expired. Please sign in again.", headers={"WWW-Authenticate": "Bearer"})
+    if not token: raise HTTPException(status_code=401, detail="Please sign in to PRISM", headers={"WWW-Authenticate": "Bearer"})
+    try: claims = decode_access_token(token)
+    except jwt.PyJWTError: raise HTTPException(status_code=401, detail="Your PRISM session has expired. Please sign in again.", headers={"WWW-Authenticate": "Bearer"})
     user_id, tenant_id, role = claims.get("sub"), claims.get("tenant_id"), claims.get("role")
-    if not user_id or not tenant_id or role not in ROLE_ORDER:
-        raise HTTPException(status_code=401, detail="Invalid PRISM session")
+    if not user_id or not tenant_id or role not in ROLE_ORDER: raise HTTPException(status_code=401, detail="Invalid PRISM session")
     async with AsyncSessionLocal() as session:
         result = await session.execute(select(User, Tenant).join(Tenant, Tenant.id == User.tenant_id).where(
             User.id == user_id, User.tenant_id == tenant_id, User.is_active.is_(True), Tenant.is_active.is_(True)))
@@ -100,12 +90,13 @@ def enforce_route_permissions(request: Request, principal: Principal) -> None:
         raise HTTPException(status_code=403, detail="Admin permission required to approve patterns")
 
 async def bootstrap_owner() -> None:
-    if not settings.bootstrap_email or not settings.bootstrap_password: return
+    email = os.getenv("PRISM_BOOTSTRAP_EMAIL", "").strip().lower()
+    password = os.getenv("PRISM_BOOTSTRAP_PASSWORD", "")
+    if not email or not password: return
     async with AsyncSessionLocal() as session:
         result = await session.execute(select(User).limit(1))
         if result.scalar_one_or_none() is not None: return
-        tenant = Tenant(name=settings.bootstrap_tenant_name or "My PRISM Workspace")
+        tenant = Tenant(name=os.getenv("PRISM_BOOTSTRAP_TENANT_NAME", "My PRISM Workspace"))
         session.add(tenant); await session.flush()
-        session.add(User(email=settings.bootstrap_email.strip().lower(), password_hash=hash_password(settings.bootstrap_password),
-                         tenant_id=tenant.id, role="owner", is_active=True))
+        session.add(User(email=email, password_hash=hash_password(password), tenant_id=tenant.id, role="owner", is_active=True))
         await session.commit()
