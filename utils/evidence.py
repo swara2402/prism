@@ -18,7 +18,7 @@ from utils.text import (
 
 @dataclass
 class LogEvent:
-    """A normalized log event with stable provenance."""
+    """A normalized log event with stable per-occurrence provenance."""
 
     evidence_id: str
     line: str
@@ -49,12 +49,13 @@ class CompressedEvidence:
 
     @property
     def compression_ratio(self) -> float:
-        if self.original_line_count == 0:
+        if self.original_line_count <= 0:
             return 0.0
-        return max(0.0, 1.0 - (len(self.pattern_counts) / self.original_line_count))
+        retained = min(self.original_line_count, len(self.events))
+        return max(0.0, 1.0 - (retained / self.original_line_count))
 
     def to_prompt(self, max_chars: int = 4000) -> str:
-        """Render evidence as data. The model receives IDs, not authority to invent evidence."""
+        """Render evidence as data, never as confirmed causality."""
         parts: List[str] = []
         for label, values in (
             ("CRITICAL EVENTS", self.critical_events),
@@ -70,15 +71,15 @@ class CompressedEvidence:
             parts.append("APIS: " + ", ".join(self.apis[:20]))
         if self.temporal_correlations:
             rows = []
-            for c in self.temporal_correlations[:20]:
+            for correlation in self.temporal_correlations[:20]:
                 rows.append(
-                    f"- {c['before_id']} -> {c['after_id']} "
-                    f"({c['delta_seconds']:.3f}s): {c['relationship']}"
+                    f"- {correlation['before_id']} -> {correlation['after_id']} "
+                    f"({float(correlation['delta_seconds']):.3f}s): {correlation['relationship']}"
                 )
-            parts.append("TEMPORAL CORRELATIONS:\n" + "\n".join(rows))
+            parts.append("TEMPORAL CORRELATIONS (ordering evidence, not causality):\n" + "\n".join(rows))
         if self.pattern_counts:
-            top = sorted(self.pattern_counts.items(), key=lambda x: -x[1])[:10]
-            parts.append("FREQUENT PATTERNS:\n" + "\n".join(f"- {p} (x{c})" for p, c in top))
+            top = sorted(self.pattern_counts.items(), key=lambda item: (-item[1], item[0]))[:10]
+            parts.append("FREQUENT PATTERNS:\n" + "\n".join(f"- {pattern} (x{count})" for pattern, count in top))
         return "\n\n".join(parts)[:max_chars]
 
 
@@ -97,10 +98,23 @@ def _parse_timestamp(line: str) -> Optional[datetime]:
 def _relationship(before: LogEvent, after: LogEvent) -> Optional[str]:
     before_text = before.line.lower()
     after_text = after.line.lower()
-    if any(x in before_text for x in ("refused", "connection refused")) and any(x in after_text for x in ("timeout", "503", "500", "5xx")):
+    before_services = set(before.services)
+    after_services = set(after.services)
+
+    if before_services and after_services and before_services == after_services:
+        same_service = True
+    else:
+        same_service = False
+
+    dependency_failure = any(token in before_text for token in ("connection refused", "connection reset", "broken pipe"))
+    service_error = any(token in after_text for token in ("timeout", " 503", " 500", "5xx", "service unavailable"))
+    if dependency_failure and service_error and not same_service:
         return "dependency_failure_before_service_error"
-    if any(x in before_text for x in ("deploy", "deployment", "release")) and after.severity_score >= 0.5:
+
+    deployment = any(token in before_text for token in ("deploy", "deployment", "release"))
+    if deployment and after.severity_score >= 0.5:
         return "deployment_before_error"
+
     if before.severity_score >= 0.7 and after.severity_score >= 0.5:
         return "high_severity_before_error"
     return None
@@ -113,64 +127,75 @@ def compress_logs(
     max_lines_per_bucket: int = 50,
     max_temporal_gap_seconds: float = 60.0,
 ) -> CompressedEvidence:
-    """Parse, normalize, deduplicate and temporally correlate bounded log evidence."""
+    """Parse, normalize, deduplicate patterns and correlate bounded log evidence.
+
+    Correlations describe temporal ordering only. They are deliberately not
+    represented as causal edges and must remain inference-level evidence.
+    """
     ev = CompressedEvidence(original_line_count=len(raw_lines))
     pattern_counter: Counter[str] = Counter()
     parsed_events: List[Tuple[LogEvent, Optional[datetime]]] = []
 
-    for line in raw_lines:
+    for index, line in enumerate(raw_lines):
         if not line or not line.strip():
             continue
         original = line.strip()
         normalized = normalize_log_line(original)
         pattern_counter[normalized] += 1
         severity, score = classify_log_severity(original)
-        services = extract_services(original)
-        apis = extract_apis(original)
-        event_id = "log-" + hash_text(normalized + "|" + original)[:12]
+        services = list(dict.fromkeys(extract_services(original)))
+        apis = list(dict.fromkeys(extract_apis(original)))
+        timestamp_match = TIMESTAMP_PATTERN.search(original)
+        timestamp = timestamp_match.group(0) if timestamp_match else None
+
+        # Include the source position so identical repeated log lines remain
+        # separately addressable evidence rather than overwriting each other.
+        event_id = "log-" + hash_text(f"{index}|{normalized}|{original}")[:12]
         event = LogEvent(
             evidence_id=event_id,
             line=original,
             normalized=normalized,
-            timestamp=(TIMESTAMP_PATTERN.search(original).group(0) if TIMESTAMP_PATTERN.search(original) else None),
+            timestamp=timestamp,
             severity=severity,
             severity_score=score,
-            services=list(dict.fromkeys(services)),
-            apis=list(dict.fromkeys(apis)),
+            services=services,
+            apis=apis,
         )
         ev.events.append(event)
         parsed_events.append((event, _parse_timestamp(original)))
         ev.apis.extend(apis)
         ev.services.extend(services)
+
+        lower = original.lower()
         if score >= 0.8:
             ev.critical_events.append(original)
         elif score >= severity_threshold:
             ev.anomalies.append(original)
-        if any(tok in original.lower() for tok in ("timeout", "refused", "5xx", "503", "500")):
+        if any(token in lower for token in ("timeout", "refused", "connection reset", "5xx", "503", "500")):
             ev.api_failures.append(original)
 
-    rare_patterns = {p for p, count in pattern_counter.items() if count <= rare_count}
+    rare_patterns = {pattern for pattern, count in pattern_counter.items() if count <= rare_count}
     for event in ev.events:
         if event.normalized in rare_patterns:
             ev.rare_events.append(event.line)
 
-    # Correlate only nearby, timestamped events. This is evidence of ordering,
-    # not proof of causality.
-    timestamped = [(e, ts) for e, ts in parsed_events if ts is not None]
+    timestamped = [(event, ts) for event, ts in parsed_events if ts is not None]
     timestamped.sort(key=lambda pair: pair[1])
     for index, (before, before_ts) in enumerate(timestamped):
         for after, after_ts in timestamped[index + 1:index + 9]:
             delta = (after_ts - before_ts).total_seconds()
             if delta < 0 or delta > max_temporal_gap_seconds:
                 break
-            relation = _relationship(before, after)
-            if relation:
-                ev.temporal_correlations.append({
-                    "before_id": before.evidence_id,
-                    "after_id": after.evidence_id,
-                    "delta_seconds": delta,
-                    "relationship": relation,
-                })
+            relationship = _relationship(before, after)
+            if relationship:
+                ev.temporal_correlations.append(
+                    {
+                        "before_id": before.evidence_id,
+                        "after_id": after.evidence_id,
+                        "delta_seconds": delta,
+                        "relationship": relationship,
+                    }
+                )
 
     ev.pattern_counts = dict(pattern_counter)
     ev.services = list(dict.fromkeys(ev.services))
@@ -180,7 +205,7 @@ def compress_logs(
     ev.api_failures = ev.api_failures[:max_lines_per_bucket]
     ev.rare_events = ev.rare_events[:max_lines_per_bucket]
     ev.temporal_correlations = ev.temporal_correlations[:50]
-    ev.compressed_line_count = len(ev.critical_events) + len(ev.anomalies) + len(ev.api_failures) + len(ev.rare_events)
+    ev.compressed_line_count = len(set(ev.critical_events + ev.anomalies + ev.api_failures + ev.rare_events))
     ev.summary = (
         f"Parsed {ev.original_line_count} lines into {len(ev.events)} events and "
         f"{len(ev.temporal_correlations)} temporal correlations. "
