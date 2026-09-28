@@ -1,4 +1,4 @@
-"""Abstract base class and execution contract for PRISM agents."""
+"""Abstract base class and execution contract for WayPoint agents."""
 from __future__ import annotations
 
 import abc
@@ -65,13 +65,16 @@ class BaseAgent(abc.ABC):
                 self.investigate(context), timeout=max(0.1, settings.agent_timeout_seconds)
             )
         except asyncio.TimeoutError:
+            # The aggregation layer historically treats finding_type=error as
+            # failed. Preserve the precise timeout reason in metadata while
+            # ensuring a timed-out agent cannot masquerade as healthy.
             payload = FindingPayload(
                 agent_name=self.name,
-                finding_type="timeout",
+                finding_type="error",
                 description=f"Agent exceeded its {settings.agent_timeout_seconds:.1f}s execution deadline.",
                 confidence=0.0,
                 evidence={"timeout_seconds": settings.agent_timeout_seconds},
-                metadata={"provenance": {"source_type": "system", "codepath": self.name, "status": "timed_out"}},
+                metadata={"execution_status": "timed_out", "provenance": {"source_type": "system", "codepath": self.name, "status": "timed_out"}},
             )
         except asyncio.CancelledError:
             raise
@@ -82,7 +85,7 @@ class BaseAgent(abc.ABC):
                 description="Agent execution failed.",
                 confidence=0.0,
                 evidence={"error_type": type(exc).__name__},
-                metadata={"provenance": {"source_type": "system", "codepath": self.name, "status": "failed"}},
+                metadata={"execution_status": "failed", "provenance": {"source_type": "system", "codepath": self.name, "status": "failed"}},
             )
         payload.latency_s = time.perf_counter() - start
         payload.agent_name = self.name
