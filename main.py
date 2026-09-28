@@ -23,7 +23,7 @@ from api.knowledge_graph import router as kg_router
 from api.memory import router as memory_router
 from api.patterns import router as patterns_router
 from api.predictions import router as predictions_router
-from auth.security import COOKIE_NAME, bootstrap_owner
+from auth.security import COOKIE_NAME, bootstrap_owner, decode_access_token
 from config.logging import configure_logging, get_logger
 from config.settings import settings
 from database.session import close_db, init_db
@@ -84,6 +84,30 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
         request_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
         request.state.request_id = request_id
+
+        # Canonicalize tenant identity before FastAPI resolves route headers.
+        # A browser session carries the authoritative tenant_id in its signed
+        # JWT. Any client-supplied tenant header is replaced with that value.
+        # Service-account requests are canonicalized later by require_api_key.
+        cookie_token = request.cookies.get(COOKIE_NAME)
+        if cookie_token:
+            try:
+                claims = decode_access_token(cookie_token)
+                tenant_id = str(claims.get("tenant_id") or "").strip()
+                if tenant_id:
+                    headers = [(k, v) for k, v in request.scope.get("headers", []) if k.lower() != b"x-tenant-id"]
+                    headers.append((b"x-tenant-id", tenant_id.encode("utf-8")))
+                    request.scope["headers"] = headers
+                    # Starlette caches Headers on first access. Refresh it so
+                    # endpoint Header parameters cannot observe the forged value.
+                    request.__dict__.pop("_headers", None)
+            except Exception:
+                # Authentication dependency remains authoritative and will
+                # reject an invalid/expired session. Never trust the header.
+                headers = [(k, v) for k, v in request.scope.get("headers", []) if k.lower() != b"x-tenant-id"]
+                request.scope["headers"] = headers
+                request.__dict__.pop("_headers", None)
+
         content_length = request.headers.get("content-length")
         if content_length:
             try:
@@ -168,8 +192,8 @@ async def readiness() -> Response:
         async with get_async_session_local() as session:
             await session.execute(text("SELECT 1"))
         checks["database"] = True
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning("readiness_database_failed", extra={"error_type": type(exc).__name__})
     payload = {"status": "ready" if all(checks.values()) else "not_ready", "checks": checks}
     return JSONResponse(status_code=200 if all(checks.values()) else 503, content=payload)
 
@@ -188,7 +212,7 @@ async def ui_root(request: Request):
 
 @app.get("/static/app.js", include_in_schema=False)
 async def ui_bundle() -> Response:
-    """Serve the existing console bundle with the session bridge prepended."""
+    """Serve the console bundle with the session bridge and safety guard."""
     legacy = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
     bridge = (STATIC_DIR / "session-bridge.js").read_text(encoding="utf-8")
     return Response(bridge + "\n" + legacy, media_type="application/javascript")
