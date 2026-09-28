@@ -1,4 +1,4 @@
-name: PRISM CI
+name: WayPoint CI
 
 on:
   workflow_dispatch:
@@ -11,13 +11,13 @@ permissions:
   contents: read
 
 concurrency:
-  group: prism-ci-${{ github.workflow }}-${{ github.ref }}
+  group: waypoint-ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 env:
   APP_ENV: test
-  DATABASE_URL: sqlite+aiosqlite:///./prism-ci.db
-  DATABASE_SYNC_URL: sqlite:///./prism-ci.db
+  DATABASE_URL: sqlite+aiosqlite:///./waypoint-ci.db
+  DATABASE_SYNC_URL: sqlite:///./waypoint-ci.db
   PRISM_JWT_SECRET: test-only-jwt-secret-012345678901234567890123
   API_KEY: test-only-api-key
   ENABLE_NEO4J: "false"
@@ -28,7 +28,7 @@ env:
 
 jobs:
   smoke:
-    name: CI smoke
+    name: Application smoke
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -46,7 +46,7 @@ jobs:
       - name: Compile source
         run: python -m compileall -q .
       - name: Import application
-        run: python -c "import main; print('PRISM import OK')"
+        run: python -c "import main; print('WayPoint import OK')"
 
   test:
     name: Unit and integration tests
@@ -97,7 +97,7 @@ jobs:
         run: alembic current
 
   dependency-audit:
-    name: Dependency audit
+    name: Dependency security audit
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
