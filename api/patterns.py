@@ -32,35 +32,43 @@ async def _principal(request: Request):
     return await principal_from_request(request)
 
 
+async def _tenant_pattern_rows(request: Request, approved: bool) -> list:
+    """Return patterns whose source incidents belong to the authenticated tenant.
+
+    Ownership is derived from incident provenance because patterns intentionally
+    remain a learned aggregate rather than gaining a second, mutable owner.
+    """
+    p = await _principal(request)
+    from database import models as dbm
+    from database.session import AsyncSessionLocal
+
+    async with AsyncSessionLocal() as session:
+        rows = await (list_approved_patterns(session) if approved else list_pending_patterns(session))
+        incident_ids = {iid for row in rows for iid in (row.incident_ids or [])}
+        if not incident_ids:
+            return []
+        incidents = (
+            await session.execute(
+                __import__("sqlalchemy").select(dbm.Incident).where(
+                    dbm.Incident.id.in_(incident_ids),
+                    dbm.Incident.tenant_id == p.tenant_id,
+                )
+            )
+        ).scalars().all()
+        owned = {incident.id for incident in incidents}
+        return [row for row in rows if any(iid in owned for iid in (row.incident_ids or []))]
+
+
 @router.get("/pending", response_model=List[PatternOut])
 async def pending_patterns(request: Request) -> List[PatternOut]:
-    p = await _principal(request)
-    from database.session import AsyncSessionLocal
-    from database import models as dbm
-    async with AsyncSessionLocal() as session:
-        rows = await list_pending_patterns(session)
-        visible = []
-        for row in rows:
-            if any((await session.get(dbm.Incident, iid)) and (await session.get(dbm.Incident, iid)).tenant_id == p.tenant_id for iid in (row.incident_ids or [])):
-                visible.append(row)
-    return [PatternOut.model_validate(r) for r in visible]
+    rows = await _tenant_pattern_rows(request, approved=False)
+    return [PatternOut.model_validate(r) for r in rows]
 
 
 @router.get("/approved", response_model=List[PatternOut])
 async def approved_patterns(request: Request) -> List[PatternOut]:
-    p = await _principal(request)
-    from database.session import AsyncSessionLocal
-    from database import models as dbm
-    async with AsyncSessionLocal() as session:
-        rows = await list_approved_patterns(session)
-        visible = []
-        for row in rows:
-            for iid in (row.incident_ids or []):
-                incident = await session.get(dbm.Incident, iid)
-                if incident and incident.tenant_id == p.tenant_id:
-                    visible.append(row)
-                    break
-    return [PatternOut.model_validate(r) for r in visible]
+    rows = await _tenant_pattern_rows(request, approved=True)
+    return [PatternOut.model_validate(r) for r in rows]
 
 
 @router.post("/{pattern_id}/approve", response_model=dict)
@@ -70,10 +78,12 @@ async def approve(pattern_id: str, body: PatternApprove, request: Request) -> di
     p = await _principal(request)
     if not p.can("admin"):
         raise HTTPException(403, "Admin permission required")
-    ok = await approve_pattern_by_id(pattern_id, body.approver, tenant_id=p.tenant_id)
+    # Never trust the caller to identify the approving principal. The authenticated
+    # identity is the audit actor and cannot be forged through request JSON.
+    ok = await approve_pattern_by_id(pattern_id, p.email, tenant_id=p.tenant_id)
     if not ok:
         raise HTTPException(404, "Pattern not found")
-    return {"approved": True, "pattern_id": pattern_id}
+    return {"approved": True, "pattern_id": pattern_id, "approved_by": p.email}
 
 
 @router.post("/match", response_model=List[MatchHit])
