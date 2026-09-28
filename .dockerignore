@@ -1,0 +1,23 @@
+# Build context hygiene: never ship local state, secrets, or VCS metadata.
+.git
+.gitignore
+.env
+.env.*
+!.env.example
+data/
+*.db
+*.sqlite
+*.sqlite3
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+venv/
+.venv/
+/tmp/
+migrations/_scratch_alembic.db
+_fresh_migrate.db
+clean_duplicates.py
+docs/
+tests/

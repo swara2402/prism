@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+*.egg-info/
+.pytest_cache/
+.coverage
+htmlcov/
+dist/
+build/
+*.log
+*.pyc
+
+# Secrets — never commit
+.env
+.env.*
+!.env.example
+
+# Runtime data
+data/
+*.db
+*.sqlite
+*.sqlite3
+
+# FAISS / embeddings artifacts
+*.faiss
+*.pkl
+*.pickle
+
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+__MACOSX/
+
+# Test / coverage
+.tox/
+.mypy_cache/
+.ruff_cache/
+.coverage.*
+coverage.xml
