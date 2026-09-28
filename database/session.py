@@ -18,7 +18,16 @@ class Base(DeclarativeBase):
 def _build_engine():
     url = settings.database_url
     kwargs: dict[str, object] = {"echo": settings.db_echo, "future": True}
-    if not url.startswith("sqlite"):
+
+    # SQLite in-memory databases are connection-local by default. Tests and
+    # local smoke checks need every async session to see the same schema/data,
+    # so use one shared connection for the lifetime of the process.
+    if url.startswith("sqlite+aiosqlite:///:memory:"):
+        from sqlalchemy.pool import StaticPool
+
+        kwargs["poolclass"] = StaticPool
+        kwargs["connect_args"] = {"check_same_thread": False}
+    elif not url.startswith("sqlite"):
         kwargs["pool_size"] = settings.db_pool_size
         kwargs["max_overflow"] = settings.db_max_overflow
     return create_async_engine(url, **kwargs)
@@ -38,7 +47,9 @@ def get_engine():
 def get_async_session_local():
     global _async_session_local
     if _async_session_local is None:
-        _async_session_local = async_sessionmaker(bind=get_engine(), class_=AsyncSession, expire_on_commit=False, autoflush=False)
+        _async_session_local = async_sessionmaker(
+            bind=get_engine(), class_=AsyncSession, expire_on_commit=False, autoflush=False
+        )
     return _async_session_local
 
 
@@ -100,7 +111,7 @@ async def init_db() -> None:
     """Initialize schema for tests/dev; production must use Alembic."""
     if settings.is_production:
         # Production deployments must run ``alembic upgrade head`` before
-        # starting the web process.  Auto-DDL is unsafe because it cannot
+        # starting the web process. Auto-DDL is unsafe because it cannot
         # express destructive/ordered schema changes or rollback semantics.
         return
     from database import models  # noqa: F401
