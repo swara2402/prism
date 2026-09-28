@@ -33,12 +33,8 @@ class MemoryHit:
 
 
 class MemoryStore:
-    # Each authenticated tenant gets an independent process-local index. The
-    # old single mutable index could switch from tenant A to tenant B while a
-    # concurrent request was still reading it.
     _instances: Dict[str, "MemoryStore"] = {}
     _legacy_instance: Optional["MemoryStore"] = None
-    _instances_lock = asyncio.Lock()
 
     def __init__(self, tenant_id: Optional[str] = None) -> None:
         self.tenant_id = tenant_id
@@ -57,11 +53,7 @@ class MemoryStore:
 
     @classmethod
     def get(cls, tenant_id: Optional[str] = None) -> "MemoryStore":
-        """Return an index permanently bound to one tenant.
-
-        ``tenant_id=None`` is retained only for legacy internal callers. API
-        paths must always pass the authenticated tenant explicitly.
-        """
+        """Return a memory index permanently bound to one tenant."""
         if tenant_id is None:
             if cls._legacy_instance is None:
                 cls._legacy_instance = cls()
@@ -77,18 +69,16 @@ class MemoryStore:
         cls._instances.clear()
         cls._legacy_instance = None
 
-    async def load(self, tenant_id: Optional[str] = None) -> None:
-        """Load only memories belonging to the store's bound tenant."""
-        effective_tenant = self.tenant_id
-        if effective_tenant is None:
-            # Legacy stores may be explicitly scoped for a one-off internal
-            # operation, but never silently load all tenants.
-            effective_tenant = tenant_id
-        if not effective_tenant:
+    def _require_tenant(self, tenant_id: Optional[str] = None) -> str:
+        effective = self.tenant_id or tenant_id
+        if not effective:
             raise ValueError("MemoryStore requires an authenticated tenant scope")
         if self.tenant_id and tenant_id and tenant_id != self.tenant_id:
             raise ValueError("MemoryStore tenant scope cannot be changed")
+        return effective
 
+    async def load(self, tenant_id: Optional[str] = None) -> None:
+        effective_tenant = self._require_tenant(tenant_id)
         async with self._lock:
             if self._loaded:
                 return
@@ -96,9 +86,7 @@ class MemoryStore:
             self._vectors.clear()
             self._meta.clear()
             self._faiss_index = None
-
             from database.session import AsyncSessionLocal
-
             async with AsyncSessionLocal() as session:
                 stmt = (
                     select(dbm.IncidentMemory, dbm.Incident.tenant_id)
@@ -108,7 +96,6 @@ class MemoryStore:
                     .limit(10_000)
                 )
                 rows = (await session.execute(stmt)).all()
-
             for record, row_tenant_id in rows:
                 self._ids.append(record.id)
                 self._vectors.append(_normalize_dim(list(record.embedding or []), settings.embedding_dim))
@@ -121,7 +108,6 @@ class MemoryStore:
                     "confidence": record.confidence,
                     "text_repr": record.text_repr,
                 }
-
             self._rebuild_faiss()
             self._loaded = True
             logger.info("memory_loaded count=%d tenant=%s faiss=%s", len(self._ids), effective_tenant, self._faiss_index is not None)
@@ -151,96 +137,36 @@ class MemoryStore:
             self._index_path.parent.mkdir(parents=True, exist_ok=True)
             faiss.write_index(self._faiss_index, str(self._index_path) + ".faiss")
             with open(str(self._index_path) + ".meta.json", "w", encoding="utf-8") as f:
-                json.dump(
-                    {
-                        "tenant_id": self.tenant_id,
-                        "embedding_model": settings.sentence_transformer_model,
-                        "embedding_dim": settings.embedding_dim,
-                        "ids": self._ids,
-                        "meta": self._meta,
-                    },
-                    f,
-                    default=str,
-                )
+                json.dump({"tenant_id": self.tenant_id, "embedding_model": settings.sentence_transformer_model, "embedding_dim": settings.embedding_dim, "ids": self._ids, "meta": self._meta}, f, default=str)
         except Exception as exc:
             logger.warning("faiss_save_failed error=%r", exc)
 
-    async def add(
-        self,
-        incident_id: str,
-        text_repr: str,
-        root_cause: str,
-        resolution: Optional[str],
-        confidence: float,
-        lessons: Sequence[str],
-        services: Sequence[str],
-        *,
-        tenant_id: Optional[str] = None,
-    ) -> str:
-        effective_tenant = self.tenant_id or tenant_id
-        if not effective_tenant:
-            raise ValueError("Memory writes require an authenticated tenant scope")
-        if self.tenant_id and tenant_id and tenant_id != self.tenant_id:
-            raise ValueError("MemoryStore tenant scope cannot be changed")
-
+    async def add(self, incident_id: str, text_repr: str, root_cause: str, resolution: Optional[str], confidence: float, lessons: Sequence[str], services: Sequence[str], *, tenant_id: Optional[str] = None) -> str:
+        effective_tenant = self._require_tenant(tenant_id)
         embedding = await embed_text(text_repr)
         from database.session import AsyncSessionLocal
-
         async with AsyncSessionLocal() as session:
             incident = await session.get(dbm.Incident, incident_id)
             if incident is None or incident.tenant_id != effective_tenant:
                 raise ValueError("Incident does not belong to the requested tenant")
-            rec = await add_memory(
-                session,
-                incident_id=incident_id,
-                text_repr=text_repr,
-                embedding=list(embedding),
-                root_cause=root_cause,
-                resolution=resolution,
-                confidence=max(0.0, min(1.0, confidence)),
-                lessons=list(lessons),
-                services=list(services),
-            )
+            rec = await add_memory(session, incident_id=incident_id, text_repr=text_repr, embedding=list(embedding), root_cause=root_cause, resolution=resolution, confidence=max(0.0, min(1.0, confidence)), lessons=list(lessons), services=list(services))
             await session.commit()
             mem_id = rec.id
 
+        # Populate existing records before appending the new one. This avoids
+        # both data loss on first write and re-entering the same asyncio lock.
+        if not self._loaded:
+            await self.load(effective_tenant)
         async with self._lock:
-            if not self._loaded:
-                # Load this tenant's existing records before appending so a
-                # first write cannot discard older memories.
-                self._lock.release()
-                try:
-                    await self.load(effective_tenant)
-                finally:
-                    await self._lock.acquire()
             self._ids.append(mem_id)
             self._vectors.append(_normalize_dim(list(embedding), settings.embedding_dim))
-            self._meta[mem_id] = {
-                "incident_id": incident_id,
-                "tenant_id": effective_tenant,
-                "root_cause": root_cause,
-                "resolution": resolution,
-                "services": list(services),
-                "confidence": confidence,
-                "text_repr": text_repr,
-            }
+            self._meta[mem_id] = {"incident_id": incident_id, "tenant_id": effective_tenant, "root_cause": root_cause, "resolution": resolution, "services": list(services), "confidence": confidence, "text_repr": text_repr}
             self._rebuild_faiss()
             self._save_faiss_snapshot()
         return mem_id
 
-    async def search(
-        self,
-        query: str,
-        top_k: int = 5,
-        similarity_threshold: float = 0.0,
-        *,
-        tenant_id: Optional[str] = None,
-    ) -> List[MemoryHit]:
-        effective_tenant = self.tenant_id or tenant_id
-        if not effective_tenant:
-            raise ValueError("Memory searches require an authenticated tenant scope")
-        if self.tenant_id and tenant_id and tenant_id != self.tenant_id:
-            raise ValueError("MemoryStore tenant scope cannot be changed")
+    async def search(self, query: str, top_k: int = 5, similarity_threshold: float = 0.0, *, tenant_id: Optional[str] = None) -> List[MemoryHit]:
+        effective_tenant = self._require_tenant(tenant_id)
         if not self._loaded:
             await self.load(effective_tenant)
         q_vec = await embed_text(query)
@@ -251,27 +177,14 @@ class MemoryStore:
                 try:
                     q = np.array([q_vec], dtype=np.float32)
                     scores, indices = self._faiss_index.search(q, min(top_k, len(self._ids)))
-                    return [
-                        self._hit(float(score), self._ids[idx])
-                        for score, idx in zip(scores[0], indices[0])
-                        if idx >= 0 and score >= similarity_threshold
-                    ]
+                    return [self._hit(float(score), self._ids[idx]) for score, idx in zip(scores[0], indices[0]) if idx >= 0 and score >= similarity_threshold]
                 except Exception as exc:
                     logger.warning("faiss_search_failed error=%r", exc)
             return self._cosine_search(q_vec, top_k, similarity_threshold)
 
     def _hit(self, similarity: float, mem_id: str) -> MemoryHit:
         m = self._meta[mem_id]
-        return MemoryHit(
-            incident_id=m["incident_id"],
-            similarity=similarity,
-            root_cause=m["root_cause"],
-            resolution=m["resolution"],
-            services=m["services"],
-            confidence=m["confidence"],
-            text_repr=m["text_repr"],
-            tenant_id=m.get("tenant_id"),
-        )
+        return MemoryHit(incident_id=m["incident_id"], similarity=similarity, root_cause=m["root_cause"], resolution=m["resolution"], services=m["services"], confidence=m["confidence"], text_repr=m["text_repr"], tenant_id=m.get("tenant_id"))
 
     def _cosine_search(self, q_vec: List[float], top_k: int, similarity_threshold: float) -> List[MemoryHit]:
         q = np.array(q_vec, dtype=np.float32)
