@@ -5,9 +5,9 @@ import hmac
 import uuid
 from typing import Optional
 
-from fastapi import Header, HTTPException, Request, status
+from fastapi import Header, HTTPException, Request
 
-from auth.security import Principal, enforce_route_permissions, principal_from_request
+from auth.security import enforce_route_permissions, principal_from_request
 from config.settings import settings
 
 
@@ -15,20 +15,28 @@ def _constant_time_compare(a: str, b: str) -> bool:
     return hmac.compare_digest(a.encode("utf-8"), b.encode("utf-8"))
 
 
+def _inject_tenant_header(request: Request, tenant_id: str) -> None:
+    """Make the authenticated tenant available to existing Header dependencies.
+
+    This keeps PRISM's existing endpoint signatures compatible while replacing
+    the caller-controlled tenant header with the tenant bound to the session.
+    """
+    headers = list(request.scope.get("headers", []))
+    headers = [(k, v) for k, v in headers if k.lower() != b"x-tenant-id"]
+    headers.append((b"x-tenant-id", tenant_id.encode("utf-8")))
+    request.scope["headers"] = headers
+
+
 async def require_api_key(
     request: Request,
     x_api_key: Optional[str] = Header(default=None, alias="X-API-Key"),
 ) -> str:
-    """Authenticate either the secure PRISM session cookie/Bearer token or legacy API key.
-
-    API keys remain available for machine-to-machine integrations. Browser users
-    use the HttpOnly PRISM session cookie and therefore never need to store a
-    long-lived secret in localStorage.
-    """
+    """Authenticate a secure PRISM session or a legacy machine API key."""
     try:
         principal = await principal_from_request(request)
         request.state.principal = principal
         request.state.tenant_id = principal.tenant_id
+        _inject_tenant_header(request, principal.tenant_id)
         enforce_route_permissions(request, principal)
         return principal.user_id
     except HTTPException as session_error:
@@ -37,8 +45,6 @@ async def require_api_key(
             if settings.is_test:
                 return "test"
             raise session_error
-        # Legacy API keys are intentionally tenantless. They are suitable for
-        # single-tenant integrations only. They cannot claim a tenant by header.
         request.state.principal = None
         request.state.tenant_id = None
         return x_api_key
