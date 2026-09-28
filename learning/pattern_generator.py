@@ -2,14 +2,13 @@
 learning.pattern_generator
 ==========================
 
-Self-Learning Pattern Generator.
+Tenant-safe self-learning pattern generator.
 
-After every solved incident this engine extracts normalized log
-patterns and links them to the confirmed root cause.  Patterns are
-stored in the ``patterns`` PostgreSQL table with ``approved=False``
-by default.  After an engineer approves a pattern (via the API),
-future investigations can short-circuit directly to the linked root
-cause whenever the pattern recurs.
+Patterns remain stored in the existing table for backwards compatibility.
+Ownership is derived from the incident IDs attached to each pattern, so this
+change does not require a destructive schema rewrite. A pattern may only be
+created, approved, or matched when at least one of its source incidents belongs
+to the authenticated tenant.
 """
 from __future__ import annotations
 
@@ -38,41 +37,17 @@ class GeneratedPattern:
 
 
 def _extract_signature(line: str) -> str:
-    """
-    Convert a raw log line into a stable *signature*.
-
-    The signature replaces:
-
-    * numbers (incl. IPs, ports, hex, percentages) with ``<N>``
-    * UUIDs with ``<UUID>``
-    * ISO timestamps with ``<TS>``
-
-    So that two log lines differing only in their dynamic tokens
-    collapse to the same signature.
-    """
     sig = normalize_log_line(line)
-    sig = re.sub(r"\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b", "<IP>", sig)
+    sig = re.sub(r"\b\d{1,3}(?:\.\d{1,3}){3}\b", "<IP>", sig)
     sig = re.sub(r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b", "<UUID>", sig)
     sig = re.sub(r"\b[0-9a-fA-F]{16,}\b", "<HEX>", sig)
     sig = re.sub(r"\b\d+\b", "<N>", sig)
-    sig = re.sub(r"\s+", " ", sig).strip()
-    return sig
+    return re.sub(r"\s+", " ", sig).strip()
 
 
-def extract_patterns(
-    logs: Sequence[str],
-    root_cause: str,
-    confidence: float,
-    severity_threshold: float = 0.5,
-    max_patterns: int = 20,
-) -> List[GeneratedPattern]:
-    """
-    Extract learnable patterns from ``logs``.
-
-    Returns a list of :class:`GeneratedPattern`.
-    """
+def extract_patterns(logs: Sequence[str], root_cause: str, confidence: float,
+                     severity_threshold: float = 0.5, max_patterns: int = 20) -> List[GeneratedPattern]:
     from utils.text import classify_log_severity
-
     seen: Dict[str, GeneratedPattern] = {}
     for line in logs:
         if not line or not line.strip():
@@ -81,9 +56,7 @@ def extract_patterns(
         if sev < severity_threshold:
             continue
         sig = _extract_signature(line)
-        if not sig:
-            continue
-        if sig in seen:
+        if not sig or sig in seen:
             continue
         seen[sig] = GeneratedPattern(
             pattern_signature=hash_text(sig),
@@ -96,21 +69,27 @@ def extract_patterns(
     return list(seen.values())
 
 
-async def persist_patterns(
-    incident_id: str,
-    patterns: Sequence[GeneratedPattern],
-) -> List[str]:
-    """Persist patterns to the DB.  Returns the created pattern IDs."""
-    from database.session import AsyncSessionLocal
+async def _incident_belongs_to_tenant(session: Any, incident_id: str, tenant_id: str | None) -> bool:
+    from database import models as dbm
+    incident = await session.get(dbm.Incident, incident_id)
+    return incident is not None and (tenant_id is None or incident.tenant_id == tenant_id)
 
+
+async def persist_patterns(incident_id: str, patterns: Sequence[GeneratedPattern], *, tenant_id: str | None = None) -> List[str]:
+    """Persist only patterns sourced from an incident in the active tenant."""
+    from database.session import AsyncSessionLocal
     created: List[str] = []
     async with AsyncSessionLocal() as session:
+        if not await _incident_belongs_to_tenant(session, incident_id, tenant_id):
+            raise ValueError("Incident does not belong to the requested tenant")
         for p in patterns:
             existing = await get_pattern_by_signature(session, p.pattern_signature)
             if existing is not None:
-                # Bump occurrence_count
+                source_ids = set(existing.incident_ids or [])
+                if not any(await _incident_belongs_to_tenant(session, iid, tenant_id) for iid in source_ids):
+                    continue
                 existing.occurrence_count = (existing.occurrence_count or 1) + 1
-                existing.incident_ids = list(set((existing.incident_ids or []) + [incident_id]))
+                existing.incident_ids = list(source_ids | {incident_id})
                 created.append(existing.id)
                 continue
             rec = await create_pattern(
@@ -127,28 +106,39 @@ async def persist_patterns(
     return created
 
 
-async def approve_pattern_by_id(pattern_id: str, approver: str) -> bool:
-    """Mark a pattern as approved by ``approver``."""
-    from database.session import AsyncSessionLocal
+async def _tenant_pattern_ids(session: Any, tenant_id: str | None, rows: Sequence[Any]) -> set[str]:
+    if tenant_id is None:
+        return {p.id for p in rows}
+    allowed: set[str] = set()
+    for p in rows:
+        for incident_id in p.incident_ids or []:
+            if await _incident_belongs_to_tenant(session, incident_id, tenant_id):
+                allowed.add(p.id)
+                break
+    return allowed
 
+
+async def approve_pattern_by_id(pattern_id: str, approver: str, *, tenant_id: str | None = None) -> bool:
+    from database.session import AsyncSessionLocal
+    from database import models as dbm
     async with AsyncSessionLocal() as session:
-        ok = await approve_pattern(session, pattern_id, approver)
-        await session.commit()
-        return ok
+        pattern = await session.get(dbm.Pattern, pattern_id)
+        if pattern is None:
+            return False
+        if tenant_id is not None and not any(
+            await _incident_belongs_to_tenant(session, iid, tenant_id)
+            for iid in (pattern.incident_ids or [])
+        ):
+            return False
+        return await approve_pattern(session, pattern_id, approver)
 
 
-async def match_approved_patterns(logs: Sequence[str]) -> List[Dict[str, Any]]:
-    """
-    Match ``logs`` against approved patterns.
-
-    Returns a list of dicts with keys ``pattern_id``, ``root_cause_hint``,
-    ``confidence``, ``matched_signature``.
-    """
+async def match_approved_patterns(logs: Sequence[str], *, tenant_id: str | None = None) -> List[Dict[str, Any]]:
     from database.session import AsyncSessionLocal
-
-    approved = []
     async with AsyncSessionLocal() as session:
         approved = await list_approved_patterns(session)
+        allowed_ids = await _tenant_pattern_ids(session, tenant_id, approved)
+        approved = [p for p in approved if p.id in allowed_ids]
 
     sig_to_pattern: Dict[str, Any] = {p.pattern_signature: p for p in approved}
     matches: List[Dict[str, Any]] = []
@@ -156,12 +146,12 @@ async def match_approved_patterns(logs: Sequence[str]) -> List[Dict[str, Any]]:
         sig = hash_text(_extract_signature(line))
         if sig in sig_to_pattern:
             p = sig_to_pattern[sig]
-            matches.append(
-                {
-                    "pattern_id": p.id,
-                    "root_cause_hint": p.root_cause_hint,
-                    "confidence": p.confidence,
-                    "matched_signature": p.pattern_signature,
-                }
-            )
+            matches.append({
+                "pattern_id": p.id,
+                "root_cause_hint": p.root_cause_hint,
+                "confidence": p.confidence,
+                "matched_signature": p.pattern_signature,
+                "provenance": "approved_historical_pattern",
+                "epistemic_status": "evidence",
+            })
     return matches
