@@ -4,6 +4,7 @@ from __future__ import annotations
 from typing import Any, Dict, List
 
 from agents.base import BaseAgent, FindingPayload
+from auth.tenant_context import get_tenant
 
 
 class HistoricalAnalyzerAgent(BaseAgent):
@@ -17,12 +18,12 @@ class HistoricalAnalyzerAgent(BaseAgent):
 
         logs: List[str] = context.get("logs", [])
         affected: List[str] = list(context.get("affected_services", []))
-        tenant_id = context.get("tenant_id")
+        tenant_id = context.get("tenant_id") or get_tenant()
         if not tenant_id:
             return FindingPayload(
                 agent_name=self.name,
                 finding_type="degraded",
-                description="Historical memory lookup skipped because tenant context is unavailable.",
+                description="Historical memory lookup skipped because trusted tenant context is unavailable.",
                 confidence=0.0,
                 evidence={"reason": "missing_tenant_context"},
                 hypotheses=[],
