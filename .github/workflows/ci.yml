@@ -68,6 +68,20 @@ jobs:
       - name: Run tests
         run: pytest -q
 
+  frontend-syntax:
+    name: Browser bundle syntax
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: smoke
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Check browser JavaScript
+        run: |
+          node --check static/app.js
+          node --check static/session-bridge.js
+          node --check static/waypoint-console-patch.js
+
   migration-check:
     name: Migration lifecycle
     runs-on: ubuntu-latest
