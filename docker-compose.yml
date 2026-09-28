@@ -28,6 +28,12 @@ services:
       - "127.0.0.1:7687:7687"
     volumes:
       - neo4j_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:7474 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
     restart: unless-stopped
 
   ollama:
@@ -39,11 +45,33 @@ services:
       - ollama_data:/root/.ollama
     restart: unless-stopped
 
+  migration:
+    build: .
+    container_name: prism_migration
+    init: true
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-incident}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-incident_db}
+      DATABASE_SYNC_URL: postgresql+psycopg2://${POSTGRES_USER:-incident}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-incident_db}
+      APP_ENV: ${APP_ENV:-production}
+      API_KEY: ${API_KEY:-}
+      NEO4J_PASSWORD: ${NEO4J_PASSWORD:-migration-placeholder}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:8000}
+    command: ["alembic", "upgrade", "head"]
+    restart: "no"
+
   api:
     build: .
     container_name: prism_api
     init: true
     depends_on:
+      migration:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
       neo4j:
@@ -65,9 +93,9 @@ services:
       CORS_ORIGINS: ${CORS_ORIGINS:-}
     ports:
       - "8000:8000"
-    command: uvicorn main:app --host 0.0.0.0 --port 8000
+    command: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://localhost:8000/health"]
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/ready"]
       interval: 30s
       timeout: 5s
       start_period: 40s
