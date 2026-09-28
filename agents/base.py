@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 from config.settings import settings
+from investigation.epistemic import mark_inferred
 
 
 @dataclass
@@ -23,6 +24,7 @@ class FindingPayload:
     metadata: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
+        metadata = mark_inferred(self.metadata)
         return {
             "agent_name": self.agent_name,
             "finding_type": self.finding_type,
@@ -32,7 +34,7 @@ class FindingPayload:
             "root_cause_hint": self.root_cause_hint,
             "hypotheses": self.hypotheses,
             "latency_s": self.latency_s,
-            "metadata": self.metadata,
+            "metadata": metadata,
         }
 
 
@@ -56,11 +58,7 @@ class BaseAgent(abc.ABC):
         return all(context.get(k) for k in self.requires)
 
     async def run(self, context: Dict[str, Any]) -> FindingPayload:
-        """Run an agent with a hard deadline.
-
-        A timeout is a first-class investigation state.  It is intentionally
-        different from an agent returning no evidence and from an exception.
-        """
+        """Run an agent with a hard deadline and explicit degraded status."""
         start = time.perf_counter()
         try:
             payload = await asyncio.wait_for(
@@ -78,7 +76,6 @@ class BaseAgent(abc.ABC):
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            # Do not expose stack traces or secrets through findings.
             payload = FindingPayload(
                 agent_name=self.name,
                 finding_type="error",
