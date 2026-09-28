@@ -22,8 +22,7 @@ def _constant_time_compare(a: str, b: str) -> bool:
 
 
 def _inject_tenant_header(request: Request, tenant_id: str) -> None:
-    headers = list(request.scope.get("headers", []))
-    headers = [(k, v) for k, v in headers if k.lower() != b"x-tenant-id"]
+    headers = [(k, v) for k, v in request.scope.get("headers", []) if k.lower() != b"x-tenant-id"]
     headers.append((b"x-tenant-id", tenant_id.encode("utf-8")))
     request.scope["headers"] = headers
 
@@ -52,14 +51,23 @@ async def require_api_key(
     request: Request,
     x_api_key: Optional[str] = Header(default=None, alias="X-API-Key"),
 ) -> str:
-    """Authenticate a human session or tenant-bound machine credential."""
+    """Authenticate a session, tenant-bound service credential, or test principal."""
     try:
         principal = await principal_from_request(request)
     except HTTPException as session_error:
         principal = await _service_account_principal(x_api_key) if x_api_key else None
+        if principal is None and settings.is_test:
+            # Tests must still exercise tenant-aware code paths. This is a
+            # deterministic synthetic principal, not a production auth bypass.
+            tenant_id = request.headers.get("X-Tenant-Id") or "test-tenant"
+            principal = Principal(
+                user_id="test-user",
+                email="test@waypoint.local",
+                tenant_id=tenant_id,
+                role="owner",
+                tenant_name="Test Workspace",
+            )
         if principal is None:
-            if settings.is_test:
-                return "test"
             raise session_error
 
     request.state.principal = principal
