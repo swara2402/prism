@@ -8,19 +8,9 @@ Walks the causal graph and propagates confidence scores from leaves
 to roots (and vice-versa) using an iterative message-passing scheme
 similar to a simplified belief-propagation.
 
-Rules:
-
-* Each node starts with its own ``confidence`` prior.
-* For every edge ``A -> B`` (A causes B), the *downstream* confidence
-  of A receives a boost proportional to ``w(B) * edge_weight(B->A)``.
-* For every edge ``A -> B``, the *upstream* confidence of B receives
-  a small boost from A (because A's existence explains B).
-* Multiple converging edges combine via a *noisy-OR*:
-
-    P_combined = 1 - prod_i (1 - p_i * w_i)
-
-* After propagation, each node's *posterior* confidence is a weighted
-  blend of its prior + incoming propagated evidence.
+The propagated value is a diagnostic support score, not a calibrated
+probability. It is deliberately bounded below 1.0 so repeated graph
+propagation cannot silently manufacture certainty.
 """
 from __future__ import annotations
 
@@ -30,6 +20,10 @@ from typing import Dict, List
 import networkx as nx
 
 from causal_graph.engine import CausalGraph
+
+# A propagation score must never be presented as absolute certainty.
+# Confirmation is a separate, explicit workflow state.
+MAX_PROPAGATED_CONFIDENCE = 0.95
 
 
 @dataclass
@@ -43,11 +37,20 @@ class PropagationResult:
 
 
 def _noisy_or(values: List[float]) -> float:
-    """Combine probabilities with noisy-OR."""
+    """Combine support values with noisy-OR."""
     prod = 1.0
     for v in values:
         prod *= max(0.0, 1.0 - max(0.0, min(1.0, v)))
     return 1.0 - prod
+
+
+def _bounded_confidence(value: float) -> float:
+    """Return a finite confidence support score in [0, MAX_PROPAGATED_CONFIDENCE]."""
+    if value != value:  # NaN
+        return 0.0
+    if value in (float("inf"), float("-inf")):
+        return MAX_PROPAGATED_CONFIDENCE if value > 0 else 0.0
+    return max(0.0, min(MAX_PROPAGATED_CONFIDENCE, float(value)))
 
 
 def propagate(
@@ -61,17 +64,9 @@ def propagate(
     """
     Run belief-propagation-style confidence propagation on ``graph``.
 
-    Parameters
-    ----------
-    iterations
-        Maximum number of message-passing iterations.
-    prior_weight
-        How much the node's own prior contributes to its posterior.
-    propagation_weight
-        How much the incoming propagated evidence contributes.
-    convergence_threshold
-        Stop early if the maximum change in posterior across all nodes
-        is below this threshold.
+    The returned values are support scores. They are intentionally capped
+    at ``MAX_PROPAGATED_CONFIDENCE``; only an explicit confirmation workflow
+    may represent a root cause as confirmed truth.
     """
     g: nx.DiGraph = graph.graph
     result = PropagationResult()
@@ -79,50 +74,40 @@ def propagate(
     if g.number_of_nodes() == 0:
         return result
 
-    # Initialize posteriors with priors
     posteriors: Dict[str, float] = {
-        n: float(g.nodes[n].get("confidence", 0.5)) for n in g.nodes()
+        n: _bounded_confidence(float(g.nodes[n].get("confidence", 0.5)))
+        for n in g.nodes()
     }
 
-    for it in range(iterations):
+    for it in range(max(0, iterations)):
         new_posteriors: Dict[str, float] = {}
         contributions: Dict[str, Dict[str, float]] = {}
 
         for node in g.nodes():
-            prior = float(g.nodes[node].get("confidence", 0.5))
+            prior = _bounded_confidence(float(g.nodes[node].get("confidence", 0.5)))
 
-            # ---- Incoming evidence from predecessors (A -> node) ----
             incoming: List[float] = []
             incoming_contrib: Dict[str, float] = {}
+
             for pred in g.predecessors(node):
                 edge = g.edges[pred, node]
-                w = float(edge.get("weight", 1.0))
-                pred_post = posteriors[pred]
-                contribution = pred_post * w
+                w = max(0.0, min(1.0, float(edge.get("weight", 1.0))))
+                contribution = _bounded_confidence(posteriors[pred] * w)
                 incoming.append(contribution)
                 incoming_contrib[pred] = contribution
 
-            # ---- Incoming evidence from successors (node -> B) ----
-            # If node causes B and B is highly confident, node is more confident.
             for succ in g.successors(node):
                 edge = g.edges[node, succ]
-                w = float(edge.get("weight", 1.0))
-                succ_post = posteriors[succ]
-                contribution = succ_post * w * 0.5  # damping
+                w = max(0.0, min(1.0, float(edge.get("weight", 1.0))))
+                contribution = _bounded_confidence(posteriors[succ] * w * 0.5)
                 incoming.append(contribution)
                 incoming_contrib[f"~{succ}"] = contribution
 
             propagated = _noisy_or(incoming) if incoming else prior
-            posterior = (
-                prior_weight * prior + propagation_weight * propagated
-            )
-            # Renormalize to [0, 1]
-            posterior = max(0.0, min(1.0, posterior))
-
-            new_posteriors[node] = posterior
+            posterior = prior_weight * prior + propagation_weight * propagated
+            new_posteriors[node] = _bounded_confidence(posterior)
             contributions[node] = incoming_contrib
 
-        # Check convergence
         max_delta = max(
             (abs(new_posteriors[n] - posteriors[n]) for n in g.nodes()),
             default=0.0,
@@ -146,5 +131,4 @@ def explain_confidence(
 ) -> Dict[str, float]:
     """Return a flat dict of (contributor -> contribution) for a node."""
     contribs = result.contributions.get(node_id, {})
-    # Sort descending
     return dict(sorted(contribs.items(), key=lambda x: -x[1]))
