@@ -26,8 +26,25 @@
     document.querySelectorAll(".brand-sub").forEach(el => { el.textContent = "INCIDENT INTELLIGENCE"; });
   }
 
+  function mountEpistemicLegend() {
+    if (document.querySelector("#waypoint-epistemic-legend")) return;
+    const content = document.querySelector(".content");
+    if (!content) return;
+    const legend = document.createElement("aside");
+    legend.id = "waypoint-epistemic-legend";
+    legend.setAttribute("aria-label", "WayPoint evidence certainty guide");
+    legend.innerHTML = `
+      <span class="wp-legend-title">HOW TO READ THIS INVESTIGATION</span>
+      <span><b>Observed</b><small>Directly supplied or measured fact</small></span>
+      <span><b>Evidence</b><small>Artifact supporting a finding</small></span>
+      <span><b>Inference</b><small>Agent or model interpretation</small></span>
+      <span><b>Confirmed</b><small>Human-verified outcome</small></span>`;
+    content.prepend(legend);
+  }
+
   async function mountSession() {
     applyBranding();
+    mountEpistemicLegend();
     try {
       const response = await nativeFetch("/auth/me", { credentials: "same-origin", cache: "no-store" });
       if (!response.ok) { window.location.replace("/login"); return; }
@@ -35,6 +52,7 @@
       window.WAYPOINT_SESSION = session;
       window.PRISM_SESSION = session;
       applyBranding();
+      mountEpistemicLegend();
       const actions = document.querySelector("#topbar-actions");
       if (!actions || document.querySelector("#waypoint-session")) return;
       const user = session.user || {};
