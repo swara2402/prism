@@ -26,7 +26,6 @@ _WEAK_PASSWORDS = {
 
 
 def _url_password(url: str) -> Optional[str]:
-    """Return only the password component of a DB URL, never the whole URL."""
     try:
         parsed = urlsplit(url)
         if parsed.password is None:
@@ -39,17 +38,11 @@ def _url_password(url: str) -> Optional[str]:
 def _is_weak_secret(value: Optional[str]) -> bool:
     if not value:
         return True
-    normalized = value.strip().lower()
-    return normalized in _WEAK_PASSWORDS
+    return value.strip().lower() in _WEAK_PASSWORDS
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(
-        env_file=str(PROJECT_ROOT / ".env"),
-        env_file_encoding="utf-8",
-        case_sensitive=False,
-        extra="ignore",
-    )
+    model_config = SettingsConfigDict(env_file=str(PROJECT_ROOT / ".env"), env_file_encoding="utf-8", case_sensitive=False, extra="ignore")
 
     database_url: str = Field(default="postgresql+asyncpg://incident:incident_pass@localhost:5432/incident_db")
     database_sync_url: str = Field(default="postgresql+psycopg2://incident:incident_pass@localhost:5432/incident_db")
@@ -76,10 +69,8 @@ class Settings(BaseSettings):
     app_log_level: str = "INFO"
     app_host: str = "0.0.0.0"
     app_port: int = 8000
-
     api_key: Optional[str] = Field(default=None)
     api_key_min_length: int = 32
-
     cors_origins: str = Field(default="")
 
     max_concurrent_investigations: int = 3
@@ -102,7 +93,6 @@ class Settings(BaseSettings):
 
     MDV_THRESHOLD: float = Field(default=0.15, description="MDV stop threshold", env="PRISM_MDV_THRESHOLD")
     MAX_INVESTIGATION_STEPS: int = Field(default=20, description="Maximum investigation iterations", env="PRISM_MAX_INVESTIGATION_STEPS")
-
     agent_default_reliability: float = 0.5
     agent_min_reliability: float = 0.2
     agent_reliability_decay: float = 0.9
@@ -148,7 +138,7 @@ class Settings(BaseSettings):
     def data_dir(self) -> Path:
         if self.is_test:
             import tempfile
-            path = Path(tempfile.gettempdir()) / "waypoint_test_data"
+            path = Path(tempfile.gettempdir()) / "prism_test_data"
         else:
             path = PROJECT_ROOT / "data"
         path.mkdir(parents=True, exist_ok=True)
@@ -173,14 +163,12 @@ class Settings(BaseSettings):
             errors.append(f"API_KEY is too short (min {self.api_key_min_length} characters)")
         elif _is_weak_secret(self.api_key):
             errors.append("API_KEY is still set to a placeholder/default value")
-
         for name, url in (("DATABASE_URL", self.database_url), ("DATABASE_SYNC_URL", self.database_sync_url)):
             password = _url_password(url)
             if password is None:
                 errors.append(f"{name} must contain an explicit database password in production")
             elif _is_weak_secret(password):
                 errors.append(f"{name} contains a weak/default password")
-
         if _is_weak_secret(self.neo4j_password):
             errors.append("NEO4J_PASSWORD is weak/default")
         if not self.cors_origins_list:
