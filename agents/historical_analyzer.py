@@ -31,7 +31,9 @@ class HistoricalAnalyzerAgent(BaseAgent):
             )
 
         query = " ".join(logs[:50]) + " " + " ".join(affected)
-        hits = await MemoryStore.get().search(query, top_k=5, tenant_id=tenant_id)
+        # The store itself is permanently bound to this tenant, preventing a
+        # concurrent request for another tenant from swapping the shared index.
+        hits = await MemoryStore.get(tenant_id).search(query, top_k=5)
         if not hits:
             return FindingPayload(
                 agent_name=self.name,
