@@ -1,23 +1,26 @@
-"""Human login/session endpoints for the PRISM console."""
+"""Human login/session and workspace membership endpoints."""
 from __future__ import annotations
-from fastapi import APIRouter, HTTPException, Request, Response, status
-from pydantic import BaseModel, Field
-from auth.security import COOKIE_NAME, authenticate_login, create_access_token, principal_from_request
-from config.settings import settings
-from database.auth_models import User, Tenant
-from database.session import AsyncSessionLocal
+import secrets
+from fastapi import APIRouter,HTTPException,Request,Response
+from pydantic import BaseModel,Field
 from sqlalchemy import select
+from auth.security import COOKIE_NAME,authenticate_login,create_access_token,hash_password,principal_from_request
+from config.settings import settings
+from database.auth_models import User,Tenant
+from database.session import AsyncSessionLocal
 
 router=APIRouter(prefix="/auth",tags=["auth"])
 class LoginRequest(BaseModel):
-    email: str=Field(min_length=3,max_length=320)
-    password: str=Field(min_length=1,max_length=256)
+    email:str=Field(min_length=3,max_length=320); password:str=Field(min_length=1,max_length=256)
+class MemberCreate(BaseModel):
+    email:str=Field(min_length=3,max_length=320); role:str="viewer"; password:str=Field(min_length=12,max_length=256)
+class RoleUpdate(BaseModel): role:str
 
 @router.post("/login")
 async def login(body:LoginRequest,response:Response)->dict:
     if "@" not in body.email: raise HTTPException(422,"Enter a valid email address")
     principal=await authenticate_login(body.email,body.password)
-    if not principal: raise HTTPException(status_code=401,detail="Email or password is incorrect")
+    if not principal: raise HTTPException(401,"Email or password is incorrect")
     async with AsyncSessionLocal() as session:
         row=(await session.execute(select(User,Tenant).join(Tenant,Tenant.id==User.tenant_id).where(User.id==principal.user_id))).first()
     user,tenant=row; token=create_access_token(user,tenant)
@@ -25,10 +28,41 @@ async def login(body:LoginRequest,response:Response)->dict:
     return {"user":{"id":principal.user_id,"email":principal.email,"role":principal.role},"tenant":{"id":principal.tenant_id,"name":principal.tenant_name}}
 
 @router.post("/logout")
-async def logout(response:Response)->dict:
-    response.delete_cookie(COOKIE_NAME,path="/"); return {"logged_out":True}
+async def logout(response:Response)->dict: response.delete_cookie(COOKIE_NAME,path="/"); return {"logged_out":True}
 
 @router.get("/me")
 async def me(request:Request)->dict:
-    principal=await principal_from_request(request)
-    return {"user":{"id":principal.user_id,"email":principal.email,"role":principal.role},"tenant":{"id":principal.tenant_id,"name":principal.tenant_name},"permissions":{"can_investigate":principal.can("engineer"),"can_admin":principal.can("admin"),"can_manage_workspace":principal.can("owner")}}
+    p=await principal_from_request(request)
+    return {"user":{"id":p.user_id,"email":p.email,"role":p.role},"tenant":{"id":p.tenant_id,"name":p.tenant_name},"permissions":{"can_investigate":p.can("engineer"),"can_admin":p.can("admin"),"can_manage_workspace":p.can("owner")}}
+
+@router.get("/members")
+async def members(request:Request)->list[dict]:
+    p=await principal_from_request(request)
+    if not p.can("admin"): raise HTTPException(403,"Admin permission required")
+    async with AsyncSessionLocal() as session:
+        rows=(await session.execute(select(User).where(User.tenant_id==p.tenant_id).order_by(User.email))).scalars().all()
+    return [{"id":u.id,"email":u.email,"role":u.role,"active":u.is_active} for u in rows]
+
+@router.post("/members")
+async def add_member(body:MemberCreate,request:Request)->dict:
+    p=await principal_from_request(request)
+    if not p.can("admin"): raise HTTPException(403,"Admin permission required")
+    if body.role not in {"viewer","engineer","admin"}: raise HTTPException(400,"Role must be viewer, engineer, or admin")
+    async with AsyncSessionLocal() as session:
+        exists=(await session.execute(select(User).where(User.email==body.email.strip().lower()))).scalar_one_or_none()
+        if exists: raise HTTPException(409,"A user with that email already exists")
+        user=User(email=body.email.strip().lower(),password_hash=hash_password(body.password),tenant_id=p.tenant_id,role=body.role,is_active=True)
+        session.add(user); await session.commit(); await session.refresh(user)
+    return {"id":user.id,"email":user.email,"role":user.role}
+
+@router.patch("/members/{user_id}/role")
+async def change_role(user_id:str,body:RoleUpdate,request:Request)->dict:
+    p=await principal_from_request(request)
+    if not p.can("owner"): raise HTTPException(403,"Workspace owner permission required")
+    if body.role not in {"viewer","engineer","admin","owner"}: raise HTTPException(400,"Invalid role")
+    async with AsyncSessionLocal() as session:
+        user=(await session.execute(select(User).where(User.id==user_id,User.tenant_id==p.tenant_id))).scalar_one_or_none()
+        if not user: raise HTTPException(404,"Member not found")
+        if user.id==p.user_id and body.role!="owner": raise HTTPException(400,"Owner cannot remove their own owner role")
+        user.role=body.role; await session.commit()
+    return {"id":user.id,"email":user.email,"role":user.role}
