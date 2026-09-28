@@ -11,7 +11,6 @@ from typing import AsyncGenerator, Callable
 from fastapi import Depends, FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
-from fastapi.staticfiles import StaticFiles
 from sqlalchemy import text
 from starlette.middleware.base import BaseHTTPMiddleware
 
@@ -77,31 +76,20 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
         request_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
         request.state.request_id = request_id
-
-        # Tenant identity is a server-side authentication property, never a
-        # client-selected routing value. Rewrite the header before FastAPI
-        # resolves route parameters so legacy endpoints that still declare
-        # X-Tenant-Id cannot be tricked into reading another workspace.
-        token = request.cookies.get(COOKIE_NAME)
-        if not token:
-            auth = request.headers.get("Authorization", "")
-            if auth.lower().startswith("bearer "):
-                token = auth[7:].strip()
-        if token:
+        cookie_token = request.cookies.get(COOKIE_NAME)
+        if cookie_token:
             try:
-                claims = decode_access_token(token)
-                trusted_tenant = claims.get("tenant_id")
-                supplied_tenant = request.headers.get("X-Tenant-Id")
-                if trusted_tenant:
-                    if supplied_tenant and supplied_tenant != trusted_tenant:
-                        return JSONResponse(status_code=403, content={"detail": "Tenant context is controlled by the authenticated session"}, headers={"X-Request-ID": request_id})
+                claims = decode_access_token(cookie_token)
+                tenant_id = str(claims.get("tenant_id") or "").strip()
+                if tenant_id:
                     headers = [(k, v) for k, v in request.scope.get("headers", []) if k.lower() != b"x-tenant-id"]
-                    headers.append((b"x-tenant-id", str(trusted_tenant).encode("utf-8")))
+                    headers.append((b"x-tenant-id", tenant_id.encode("utf-8")))
                     request.scope["headers"] = headers
+                    request.__dict__.pop("_headers", None)
             except Exception:
-                # Authentication dependency produces the authoritative 401.
-                # Do not turn malformed credentials into an information leak.
-                pass
+                headers = [(k, v) for k, v in request.scope.get("headers", []) if k.lower() != b"x-tenant-id"]
+                request.scope["headers"] = headers
+                request.__dict__.pop("_headers", None)
 
         content_length = request.headers.get("content-length")
         if content_length:
@@ -149,25 +137,21 @@ async def health() -> dict:
 @app.get("/internal/health", tags=["meta"])
 async def internal_health(_api_key: str = Depends(require_api_key)) -> dict:
     kg_store = KnowledgeGraphStore.get()
-    memory_store = MemoryStore.get(getattr(__import__("fastapi").Request, "state", None)) if False else MemoryStore.get()
+    memory_store = MemoryStore.get()
     return {"status": "ok", "env": settings.app_env, "version": "2.0.0", "service": "WayPoint", "memory_scope": "tenant-bound-lazy", "memory_size": memory_store.size(), "subsystems": {"database": "connected", "memory": "lazy", "faiss": "tenant-scoped-lazy" if settings.enable_faiss else "disabled", "neo4j": "connected" if getattr(kg_store, "_driver", None) else "fallback_mode"}}
 
 
 @app.get("/ready", tags=["meta"])
 async def readiness() -> Response:
     checks = {"database": False}
-    error: str | None = None
     try:
         from database.session import get_async_session_local
         async with get_async_session_local() as session:
             await session.execute(text("SELECT 1"))
         checks["database"] = True
     except Exception as exc:
-        error = type(exc).__name__
-        logger.error("readiness_database_failed", extra={"error_type": error})
+        logger.warning("readiness_database_failed", extra={"error_type": type(exc).__name__})
     payload = {"status": "ready" if all(checks.values()) else "not_ready", "checks": checks}
-    if error:
-        payload["error"] = error
     return JSONResponse(status_code=200 if all(checks.values()) else 503, content=payload)
 
 
@@ -185,17 +169,12 @@ async def ui_root(request: Request):
 
 @app.get("/static/app.js", include_in_schema=False)
 async def ui_bundle() -> Response:
+    """Serve the session bridge, legacy bundle, then final-result guard."""
     legacy = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
     bridge = (STATIC_DIR / "session-bridge.js").read_text(encoding="utf-8")
-    return Response(bridge + "\n" + legacy, media_type="application/javascript")
+    patch = (STATIC_DIR / "waypoint-console-patch.js").read_text(encoding="utf-8")
+    return Response(bridge + "\n" + legacy + "\n" + patch, media_type="application/javascript")
 
-
-@app.get("/api/info", tags=["meta"])
-async def service_info(_api_key: str = Depends(require_api_key)) -> dict:
-    return {"name": "WayPoint — Incident Intelligence", "version": "2.0.0", "docs": "/docs" if not settings.is_production else None, "auth": "WayPoint session cookie or tenant-bound service account", "epistemic_model": ["observed", "evidence", "inference", "confirmed"]}
-
-
-app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 if __name__ == "__main__":
     import uvicorn

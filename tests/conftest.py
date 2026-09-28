@@ -29,7 +29,6 @@ os.environ["ENABLE_NEO4J"] = "false"
 os.environ["ENABLE_OLLAMA"] = "false"
 os.environ["ENABLE_FAISS"] = "false"
 os.environ["SENTENCE_TRANSFORMER_MODEL"] = "all-MiniLM-L6-v2"
-# Test API key (long enough)
 os.environ["API_KEY"] = "test-api-key-that-is-long-enough-32chars"
 os.environ["CORS_ORIGINS"] = "http://testclient"
 
@@ -37,10 +36,12 @@ os.environ["CORS_ORIGINS"] = "http://testclient"
 @pytest_asyncio.fixture
 async def db_session():
     """Provide an in-memory SQLite session for each test."""
-    # Clear settings cache so test env is picked up
     from config.settings import get_settings
     get_settings.cache_clear()
 
+    # Import all mapped models before creating the schema.
+    from database import models  # noqa: F401
+    from database import auth_models  # noqa: F401
     from database.session import Base, engine, AsyncSessionLocal
 
     async with engine.begin() as conn:
@@ -67,14 +68,7 @@ def event_loop():
 
 @pytest.fixture(scope="session", autouse=True)
 def _clean_test_data_dir():
-    """Start every pytest session from an empty PRISM data dir.
-
-    ``settings.data_dir`` is a stable test-mode path (``<tmp>/prism_test_data``)
-    shared across processes and runs.  Learning stores persist JSON there, so a
-    stale file from an older run could otherwise resurrect state after the
-    per-test in-memory resets.  Purge it once per session for a reproducible,
-    fresh evaluation environment.
-    """
+    """Start every pytest session from an empty PRISM data dir."""
     import shutil
 
     from config.settings import settings
@@ -87,18 +81,8 @@ def _clean_test_data_dir():
 
 
 @pytest.fixture(autouse=True)
-def _reset_learning_state():
-    """Strict per-test isolation for all module-level learning state.
-
-    Reliability EMA, action-effectiveness EMA, memory index, knowledge-graph
-    fallback graph, and the DB engine are all process-global singletons.
-    Without resetting them, an earlier scenario silently contaminates the
-    next (Phase 3: reproducible, independent evaluation runs).  The persisted
-    JSON stores are live files under ``settings.data_dir``, so the on-disk
-    state is purged before every test as well — otherwise an earlier test
-    that wrote to the store would be reloaded (not just cached) by a later
-    one.
-    """
+async def _reset_learning_state():
+    """Reset process-global state and create a complete isolated test schema."""
     import shutil
 
     from config.settings import settings
@@ -111,7 +95,9 @@ def _reset_learning_state():
     from investigation.action_effectiveness import reset_effectiveness_cache
     from memory.store import MemoryStore
     from knowledge_graph.store import KnowledgeGraphStore
-    from database.session import reset_engine
+    from database.session import Base, get_engine, reset_engine
+    from database import models  # noqa: F401
+    from database import auth_models  # noqa: F401
 
     reset_reliability_cache()
     reset_effectiveness_cache()
@@ -119,27 +105,30 @@ def _reset_learning_state():
     KnowledgeGraphStore.reset()
     reset_engine()
 
-    # The request rate limiter is a process-global sliding window keyed by
-    # API key; without clearing it, calls from earlier tests would count
-    # against later ones and trip spurious 429s.
+    # Some TestClient fixtures do not enter the application's lifespan.
+    # Without an explicit schema here, authentication reached SQLite before
+    # startup initialization and failed with "no such table: users".
+    engine = get_engine()
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
     inv = sys.modules.get("api.investigation")
     limiter = getattr(inv, "_rate_limiter", None) if inv is not None else None
     if limiter is not None:
         hits = getattr(limiter, "_hits", None)
         if hits is not None:
             hits.clear()
-    yield
+
+    try:
+        yield
+    finally:
+        await engine.dispose()
+        reset_engine()
 
 
 @pytest.fixture
-def api_headers():
-    """Headers with valid test API key."""
-    return {"X-API-Key": "test-api-key-that-is-long-enough-32chars"}
-
-
-@pytest.fixture
-def client(api_headers):
-    """FastAPI TestClient with auth headers helper."""
+def client():
+    """FastAPI TestClient."""
     from fastapi.testclient import TestClient
     from main import app
     return TestClient(app)
