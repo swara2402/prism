@@ -33,69 +33,88 @@ class MemoryHit:
 
 
 class MemoryStore:
-    _instance: Optional["MemoryStore"] = None
+    """Tenant-isolated in-process vector memory.
 
-    def __init__(self) -> None:
+    Each tenant gets a separate store/index object. This avoids the previous
+    design where one mutable FAISS index was repeatedly switched between
+    tenants, allowing concurrent requests to observe the wrong index.
+    """
+
+    _instances: Dict[Optional[str], "MemoryStore"] = {}
+
+    def __init__(self, tenant_id: Optional[str] = None) -> None:
+        self._tenant_scope = tenant_id
         self._ids: List[str] = []
         self._vectors: List[List[float]] = []
         self._meta: Dict[str, Dict[str, Any]] = {}
         self._faiss_index = None
         self._lock = asyncio.Lock()
         self._loaded = False
-        self._index_path = Path(settings.faiss_index_path)
-        self._tenant_scope: Optional[str] = None
+        base = Path(settings.faiss_index_path)
+        # Never let two tenant indexes write the same snapshot.
+        self._index_path = base.parent / (f"{base.name}_{tenant_id or 'unscoped'}")
 
     @classmethod
-    def get(cls) -> "MemoryStore":
-        if cls._instance is None:
-            cls._instance = cls()
-        return cls._instance
+    def get(cls, tenant_id: Optional[str] = None) -> "MemoryStore":
+        if tenant_id not in cls._instances:
+            cls._instances[tenant_id] = cls(tenant_id=tenant_id)
+        return cls._instances[tenant_id]
 
     @classmethod
     def reset(cls) -> None:
-        cls._instance = None
+        cls._instances.clear()
 
     async def load(self, tenant_id: Optional[str] = None) -> None:
-        """Load only memories belonging to ``tenant_id``.
-
-        A tenant-scoped process must never reuse a global FAISS index.  The
-        scope is part of the in-memory index identity.
-        """
+        """Load only memories belonging to this store's tenant."""
+        effective_tenant = self._tenant_scope if tenant_id is None else tenant_id
+        if effective_tenant != self._tenant_scope:
+            raise ValueError("MemoryStore tenant scope cannot be changed after creation")
         async with self._lock:
-            if self._loaded and self._tenant_scope == tenant_id:
+            if self._loaded:
                 return
             self._ids.clear()
             self._vectors.clear()
             self._meta.clear()
             self._faiss_index = None
-            self._tenant_scope = tenant_id
 
             from database.session import AsyncSessionLocal
-
             async with AsyncSessionLocal() as session:
-                stmt = select(dbm.IncidentMemory, dbm.Incident.tenant_id).join(
-                    dbm.Incident, dbm.Incident.id == dbm.IncidentMemory.incident_id
-                ).order_by(dbm.IncidentMemory.created_at.desc()).limit(10_000)
-                if tenant_id is not None:
-                    stmt = stmt.where(dbm.Incident.tenant_id == tenant_id)
+                stmt = (
+                    select(dbm.IncidentMemory, dbm.Incident.tenant_id)
+                    .join(dbm.Incident, dbm.Incident.id == dbm.IncidentMemory.incident_id)
+                    .order_by(dbm.IncidentMemory.created_at.desc())
+                    .limit(10_000)
+                )
+                if effective_tenant is None:
+                    # An unscoped store is deliberately empty in production.
+                    if settings.is_production:
+                        self._loaded = True
+                        return
+                else:
+                    stmt = stmt.where(dbm.Incident.tenant_id == effective_tenant)
                 rows = (await session.execute(stmt)).all()
 
-            for r, row_tenant_id in rows:
-                self._ids.append(r.id)
-                self._vectors.append(_normalize_dim(list(r.embedding or []), settings.embedding_dim))
-                self._meta[r.id] = {
-                    "incident_id": r.incident_id,
+            for record, row_tenant_id in rows:
+                if effective_tenant is not None and row_tenant_id != effective_tenant:
+                    continue
+                self._ids.append(record.id)
+                self._vectors.append(_normalize_dim(list(record.embedding or []), settings.embedding_dim))
+                self._meta[record.id] = {
+                    "incident_id": record.incident_id,
                     "tenant_id": row_tenant_id,
-                    "root_cause": r.root_cause,
-                    "resolution": r.resolution,
-                    "services": list(r.services or []),
-                    "confidence": r.confidence,
-                    "text_repr": r.text_repr,
+                    "root_cause": record.root_cause,
+                    "resolution": record.resolution,
+                    "services": list(record.services or []),
+                    "confidence": record.confidence,
+                    "text_repr": record.text_repr,
                 }
 
             self._rebuild_faiss()
             self._loaded = True
-            logger.info("memory_loaded count=%d tenant=%s faiss=%s", len(self._ids), tenant_id, self._faiss_index is not None)
+            logger.info(
+                "memory_loaded count=%d tenant=%s faiss=%s",
+                len(self._ids), effective_tenant, self._faiss_index is not None,
+            )
 
     def _rebuild_faiss(self) -> None:
         if not settings.enable_faiss or not self._vectors:
@@ -122,7 +141,17 @@ class MemoryStore:
             self._index_path.parent.mkdir(parents=True, exist_ok=True)
             faiss.write_index(self._faiss_index, str(self._index_path) + ".faiss")
             with open(str(self._index_path) + ".meta.json", "w", encoding="utf-8") as f:
-                json.dump({"tenant_id": self._tenant_scope, "embedding_model": settings.sentence_transformer_model, "embedding_dim": settings.embedding_dim, "ids": self._ids, "meta": self._meta}, f, default=str)
+                json.dump(
+                    {
+                        "tenant_id": self._tenant_scope,
+                        "embedding_model": settings.sentence_transformer_model,
+                        "embedding_dim": settings.embedding_dim,
+                        "ids": self._ids,
+                        "meta": self._meta,
+                    },
+                    f,
+                    default=str,
+                )
         except Exception as exc:
             logger.warning("faiss_save_failed error=%r", exc)
 
@@ -138,14 +167,17 @@ class MemoryStore:
         *,
         tenant_id: Optional[str] = None,
     ) -> str:
-        """Persist first, then index. Persistence failure is never hidden."""
+        effective_tenant = self._tenant_scope if tenant_id is None else tenant_id
+        if effective_tenant != self._tenant_scope:
+            raise ValueError("MemoryStore tenant mismatch")
+        if effective_tenant is None and settings.is_production:
+            raise ValueError("Tenant context is required for production memory writes")
+
         embedding = await embed_text(text_repr)
         from database.session import AsyncSessionLocal
-
         async with AsyncSessionLocal() as session:
-            # Verify incident ownership before creating the memory.
             incident = await session.get(dbm.Incident, incident_id)
-            if incident is None or (tenant_id is not None and incident.tenant_id != tenant_id):
+            if incident is None or incident.tenant_id != effective_tenant:
                 raise ValueError("Incident does not belong to the requested tenant")
             rec = await add_memory(
                 session,
@@ -162,20 +194,13 @@ class MemoryStore:
             mem_id = rec.id
 
         async with self._lock:
-            # Switch to the caller's tenant scope before indexing if needed.
-            if self._loaded and self._tenant_scope != tenant_id:
-                self._loaded = False
             if not self._loaded:
-                # Release/reacquire is unnecessary here because load() uses the
-                # same lock. Populate this single record directly.
-                self._ids.clear(); self._vectors.clear(); self._meta.clear(); self._faiss_index = None
-                self._tenant_scope = tenant_id
-                self._loaded = True
+                await self.load()
             self._ids.append(mem_id)
             self._vectors.append(_normalize_dim(list(embedding), settings.embedding_dim))
             self._meta[mem_id] = {
                 "incident_id": incident_id,
-                "tenant_id": tenant_id,
+                "tenant_id": effective_tenant,
                 "root_cause": root_cause,
                 "resolution": resolution,
                 "services": list(services),
@@ -186,9 +211,23 @@ class MemoryStore:
             self._save_faiss_snapshot()
         return mem_id
 
-    async def search(self, query: str, top_k: int = 5, similarity_threshold: float = 0.0, *, tenant_id: Optional[str] = None) -> List[MemoryHit]:
-        if not self._loaded or self._tenant_scope != tenant_id:
-            await self.load(tenant_id=tenant_id)
+    async def search(
+        self,
+        query: str,
+        top_k: int = 5,
+        similarity_threshold: float = 0.0,
+        *,
+        tenant_id: Optional[str] = None,
+    ) -> List[MemoryHit]:
+        effective_tenant = self._tenant_scope if tenant_id is None else tenant_id
+        if effective_tenant != self._tenant_scope:
+            return await self.get(effective_tenant).search(
+                query, top_k=top_k, similarity_threshold=similarity_threshold
+            )
+        if effective_tenant is None and settings.is_production:
+            raise ValueError("Tenant context is required for production memory search")
+        if not self._loaded:
+            await self.load()
         if not self._vectors:
             return []
         q_vec = await embed_text(query)
