@@ -24,12 +24,11 @@ sys.path.insert(0, str(PROJECT_ROOT))
 # Force test environment BEFORE any settings import
 os.environ["APP_ENV"] = "test"
 os.environ["DATABASE_URL"] = "sqlite+aiosqlite:///:memory:"
-os.environ["DATABASE_SYNC_URL"] = "sqlite:///:memory:"
+os.environ["DATABASE_SYNC_URL"] = "sqlite:///./waypoint-ci.db"
 os.environ["ENABLE_NEO4J"] = "false"
 os.environ["ENABLE_OLLAMA"] = "false"
 os.environ["ENABLE_FAISS"] = "false"
 os.environ["SENTENCE_TRANSFORMER_MODEL"] = "all-MiniLM-L6-v2"
-# Test API key (long enough)
 os.environ["API_KEY"] = "test-api-key-that-is-long-enough-32chars"
 os.environ["CORS_ORIGINS"] = "http://testclient"
 
@@ -111,14 +110,8 @@ def _reset_learning_state():
 
 
 @pytest.fixture
-def api_headers():  # vulture: ignore
-    """Headers with valid test API key."""
-    return {"X-API-Key": "test-api-key-that-is-long-enough-32chars"}
-
-
-@pytest.fixture
-def client(api_headers):
-    """FastAPI TestClient with auth headers helper."""
+def client():
+    """FastAPI TestClient."""
     from fastapi.testclient import TestClient
     from main import app
     return TestClient(app)
