@@ -31,27 +31,15 @@ class SearchHit(BaseModel):
 def _tenant_from_request(request: Request) -> str:
     tenant_id = getattr(request.state, "tenant_id", None)
     if not tenant_id:
-        # Memory is security-sensitive. Never fall back to an unscoped index.
         raise HTTPException(status_code=500, detail="Authenticated tenant context is unavailable")
     return tenant_id
 
 
 @router.post("/search", response_model=List[SearchHit])
-async def search_memory(
-    body: SearchRequest,
-    request: Request,
-    _api_key: str = Depends(require_api_key),
-) -> List[SearchHit]:
+async def search_memory(body: SearchRequest, request: Request, _api_key: str = Depends(require_api_key)) -> List[SearchHit]:
     tenant_id = _tenant_from_request(request)
-    store = MemoryStore.get()
-    hits = await store.search(
-        body.query,
-        top_k=body.top_k,
-        similarity_threshold=body.similarity_threshold,
-        tenant_id=tenant_id,
-    )
-    # Defense in depth: never serialize a hit from another tenant even if a
-    # future storage implementation accidentally returns one.
+    store = MemoryStore.get(tenant_id)
+    hits = await store.search(body.query, top_k=body.top_k, similarity_threshold=body.similarity_threshold)
     return [
         SearchHit(
             incident_id=h.incident_id,
@@ -69,10 +57,6 @@ async def search_memory(
 @router.get("/stats")
 async def memory_stats(request: Request, _api_key: str = Depends(require_api_key)) -> dict:
     tenant_id = _tenant_from_request(request)
-    store = MemoryStore.get()
-    await store.load(tenant_id=tenant_id)
-    return {
-        "size": store.size(),
-        "tenant_scoped": True,
-        "faiss_enabled": store._faiss_index is not None,
-    }
+    store = MemoryStore.get(tenant_id)
+    await store.load()
+    return {"size": store.size(), "tenant_scoped": True, "faiss_enabled": store._faiss_index is not None}
