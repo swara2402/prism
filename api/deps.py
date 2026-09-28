@@ -15,6 +15,7 @@ from auth.tenant_context import set_tenant
 from config.settings import settings
 from database.auth_models import ServiceAccount, Tenant
 from database.session import AsyncSessionLocal
+import database.tenant_enforcement  # noqa: F401  # register ORM tenant guards
 
 
 def _constant_time_compare(a: str, b: str) -> bool:
@@ -22,10 +23,12 @@ def _constant_time_compare(a: str, b: str) -> bool:
 
 
 def _inject_tenant_header(request: Request, tenant_id: str) -> None:
+    """Replace any client tenant header with the authenticated tenant."""
     headers = list(request.scope.get("headers", []))
     headers = [(k, v) for k, v in headers if k.lower() != b"x-tenant-id"]
     headers.append((b"x-tenant-id", tenant_id.encode("utf-8")))
     request.scope["headers"] = headers
+    request.__dict__.pop("_headers", None)
 
 
 async def _service_account_principal(token: str) -> Optional[Principal]:
@@ -52,7 +55,10 @@ async def require_api_key(
     request: Request,
     x_api_key: Optional[str] = Header(default=None, alias="X-API-Key"),
 ) -> str:
-    """Authenticate a human session or tenant-bound machine credential."""
+    """Authenticate a human session or tenant-bound machine credential.
+
+    Tenant identity comes exclusively from the authenticated principal.
+    """
     try:
         principal = await principal_from_request(request)
     except HTTPException as session_error:

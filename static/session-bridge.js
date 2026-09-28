@@ -1,6 +1,5 @@
 /* WayPoint browser session bridge.
- * Loaded before the legacy console bundle so the UI uses the HttpOnly
- * workspace session instead of localStorage API keys.
+ * Uses the HttpOnly workspace session and adds safety/epistemic UI guards.
  */
 (() => {
   "use strict";
@@ -10,6 +9,7 @@
   window.fetch = async (input, init = {}) => {
     const opts = { ...init, credentials: "same-origin", headers: new Headers(init.headers || {}) };
     opts.headers.delete("X-API-Key");
+    opts.headers.delete("X-Tenant-Id");
     const response = await nativeFetch(input, opts);
     const url = typeof input === "string" ? input : input?.url || "";
     if (response.status === 401 && !url.includes("/auth/login") && !url.includes("/auth/me")) {
@@ -41,7 +41,8 @@
       .prism-session-copy{display:flex;flex-direction:column;text-align:right;line-height:1.2}
       .prism-session-copy b{font-size:11px}
       .prism-session-copy small{font-size:10px;color:var(--muted,#8d99aa)}
-      @media(max-width:760px){#waypoint-epistemic-legend .wp-legend-title{width:100%;align-items:flex-start}#waypoint-epistemic-legend>span{flex:1;min-width:120px}.prism-session-copy{display:none}}
+      .waypoint-inference-banner{margin:10px 0;padding:10px 12px;border:1px solid #6b5b22;border-radius:10px;background:#211d0d;color:#e9d58a;font-size:12px}
+      @media(max-width:760px){#waypoint-epistemic-legend .wp-legend-title{width:100%;align-items:flex-start}.waypoint-inference-banner{font-size:11px}.prism-session-copy{display:none}}
     `;
     document.head.appendChild(style);
   }
@@ -62,10 +63,46 @@
     content.prepend(legend);
   }
 
+  function guardEpistemicLanguage() {
+    const root = document.body;
+    if (!root) return;
+    const scan = () => {
+      const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+      const replacements = [];
+      while (walker.nextNode()) {
+        const node = walker.currentNode;
+        if (!node.nodeValue || node.parentElement?.closest("#waypoint-epistemic-legend")) continue;
+        if (/root cause determined/i.test(node.nodeValue)) replacements.push(node);
+      }
+      replacements.forEach(node => {
+        node.nodeValue = node.nodeValue.replace(/root cause determined/ig, "root cause inferred");
+        const parent = node.parentElement;
+        if (parent && !parent.querySelector(".waypoint-inference-banner")) {
+          const banner = document.createElement("div");
+          banner.className = "waypoint-inference-banner";
+          banner.textContent = "Inference only. WayPoint has not confirmed this root cause. Confirm the actual cause after service recovery or external verification.";
+          parent.appendChild(banner);
+        }
+      });
+    };
+    scan();
+    new MutationObserver(scan).observe(root, {subtree:true, childList:true, characterData:true});
+  }
+
+  function loadConsolePatch() {
+    if (document.querySelector('script[data-waypoint-console-patch]')) return;
+    const script = document.createElement("script");
+    script.src = "/static/waypoint-console-patch.js";
+    script.dataset.waypointConsolePatch = "true";
+    script.async = false;
+    document.head.appendChild(script);
+  }
+
   async function mountSession() {
     applyBranding();
     mountStyles();
     mountEpistemicLegend();
+    guardEpistemicLanguage();
     try {
       const response = await nativeFetch("/auth/me", { credentials: "same-origin", cache: "no-store" });
       if (!response.ok) { window.location.replace("/login"); return; }
@@ -75,23 +112,25 @@
       applyBranding();
       mountEpistemicLegend();
       const actions = document.querySelector("#topbar-actions");
-      if (!actions || document.querySelector("#waypoint-session")) return;
-      const user = session.user || {};
-      const tenant = session.tenant || {};
-      const wrap = document.createElement("div");
-      wrap.id = "waypoint-session";
-      wrap.innerHTML = `<span class="prism-session-copy"><b>${esc(user.email || "User")}</b><small>${esc(tenant.name || "Workspace")} · ${esc(user.role || "viewer")}</small></span><button class="icon-btn" id="prism-logout" type="button" title="Sign out" aria-label="Sign out">↪</button>`;
-      actions.prepend(wrap);
-      const settings = document.querySelector("#btn-settings");
-      if (settings) settings.style.display = "none";
-      document.querySelector("#prism-logout")?.addEventListener("click", async () => {
-        try { await nativeFetch("/auth/logout", { method: "POST", credentials: "same-origin" }); }
-        finally { window.location.replace("/login"); }
-      });
+      if (actions && !document.querySelector("#waypoint-session")) {
+        const user = session.user || {};
+        const tenant = session.tenant || {};
+        const wrap = document.createElement("div");
+        wrap.id = "waypoint-session";
+        wrap.innerHTML = `<span class="prism-session-copy"><b>${esc(user.email || "User")}</b><small>${esc(tenant.name || "Workspace")} · ${esc(user.role || "viewer")}</small></span><button class="icon-btn" id="prism-logout" type="button" title="Sign out" aria-label="Sign out">↪</button>`;
+        actions.prepend(wrap);
+        const settingsButton = document.querySelector("#btn-settings");
+        if (settingsButton) settingsButton.style.display = "none";
+        document.querySelector("#prism-logout")?.addEventListener("click", async () => {
+          try { await nativeFetch("/auth/logout", { method: "POST", credentials: "same-origin" }); }
+          finally { window.location.replace("/login"); }
+        });
+      }
     } catch (_) {
       window.location.replace("/login");
     }
   }
 
+  window.addEventListener("load", loadConsolePatch, { once: true });
   document.addEventListener("DOMContentLoaded", mountSession, { once: true });
 })();
