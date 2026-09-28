@@ -4,68 +4,111 @@ on:
   workflow_dispatch:
   pull_request:
   push:
-    branches: [main]
+    branches:
+      - main
 
 permissions:
   contents: read
 
+concurrency:
+  group: prism-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  APP_ENV: test
+  DATABASE_URL: sqlite+aiosqlite:///./prism-ci.db
+  DATABASE_SYNC_URL: sqlite:///./prism-ci.db
+  PRISM_JWT_SECRET: test-only-jwt-secret-012345678901234567890123
+  API_KEY: test-only-api-key
+  ENABLE_NEO4J: "false"
+  ENABLE_OLLAMA: "false"
+  ENABLE_FAISS: "false"
+  LEARNING_MODE: frozen
+  PYTHONUNBUFFERED: "1"
+
 jobs:
-  test:
+  smoke:
+    name: CI smoke
     runs-on: ubuntu-latest
-    env:
-      APP_ENV: test
-      DATABASE_URL: sqlite+aiosqlite:///./prism-ci.db
-      DATABASE_SYNC_URL: sqlite:///./prism-ci.db
-      PRISM_JWT_SECRET: test-only-jwt-secret-012345678901234567890123
-      API_KEY: test-only-api-key
-      ENABLE_NEO4J: "false"
-      ENABLE_OLLAMA: "false"
-      ENABLE_FAISS: "false"
-      LEARNING_MODE: frozen
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
           python-version: "3.12"
           cache: pip
-      - run: python -m pip install --upgrade pip
-      - run: pip install -r requirements.txt
-      - run: python -m compileall -q .
-      - run: pytest -q
+      - name: Install test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Compile source
+        run: python -m compileall -q .
+      - name: Import application
+        run: python -c "import main; print('PRISM import OK')"
 
-  migration-check:
+  test:
+    name: Unit and integration tests
     runs-on: ubuntu-latest
-    env:
-      APP_ENV: test
-      DATABASE_SYNC_URL: sqlite:///./prism-migration-check.db
-      PRISM_JWT_SECRET: test-only-jwt-secret-012345678901234567890123
-      API_KEY: test-only-api-key
-      ENABLE_NEO4J: "false"
-      ENABLE_OLLAMA: "false"
-      ENABLE_FAISS: "false"
-      LEARNING_MODE: frozen
+    timeout-minutes: 20
+    needs: smoke
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install -r requirements.txt
-      - run: python -m compileall -q migrations
+          cache: pip
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Run tests
+        run: pytest -q --maxfail=1
+
+  migration-check:
+    name: Migration lifecycle
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: smoke
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
       - name: Upgrade empty database to head
         run: alembic upgrade head
       - name: Verify migration head
         run: alembic current
-      - name: Downgrade migration to base
+      - name: Downgrade to base
         run: alembic downgrade base
       - name: Re-apply migrations
         run: alembic upgrade head
+      - name: Verify final migration head
+        run: alembic current
 
   dependency-audit:
+    name: Dependency audit
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install pip-audit
-      - run: pip-audit -r requirements.txt
+          cache: pip
+      - name: Install pip-audit
+        run: python -m pip install --upgrade pip pip-audit
+      - name: Audit dependencies
+        run: pip-audit -r requirements.txt
