@@ -5,6 +5,7 @@ from typing import List
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
+from sqlalchemy import select
 
 from api.deps import require_api_key
 from auth.security import principal_from_request
@@ -33,11 +34,7 @@ async def _principal(request: Request):
 
 
 async def _tenant_pattern_rows(request: Request, approved: bool) -> list:
-    """Return patterns whose source incidents belong to the authenticated tenant.
-
-    Ownership is derived from incident provenance because patterns intentionally
-    remain a learned aggregate rather than gaining a second, mutable owner.
-    """
+    """Return patterns whose source incidents belong to the authenticated tenant."""
     p = await _principal(request)
     from database import models as dbm
     from database.session import AsyncSessionLocal
@@ -49,7 +46,7 @@ async def _tenant_pattern_rows(request: Request, approved: bool) -> list:
             return []
         incidents = (
             await session.execute(
-                __import__("sqlalchemy").select(dbm.Incident).where(
+                select(dbm.Incident).where(
                     dbm.Incident.id.in_(incident_ids),
                     dbm.Incident.tenant_id == p.tenant_id,
                 )
@@ -78,8 +75,8 @@ async def approve(pattern_id: str, body: PatternApprove, request: Request) -> di
     p = await _principal(request)
     if not p.can("admin"):
         raise HTTPException(403, "Admin permission required")
-    # Never trust the caller to identify the approving principal. The authenticated
-    # identity is the audit actor and cannot be forged through request JSON.
+    # The authenticated identity is the audit actor. Never trust the caller to
+    # choose who approved a pattern through request JSON.
     ok = await approve_pattern_by_id(pattern_id, p.email, tenant_id=p.tenant_id)
     if not ok:
         raise HTTPException(404, "Pattern not found")
