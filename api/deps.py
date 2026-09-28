@@ -11,6 +11,7 @@ from fastapi import Header, HTTPException, Request
 from sqlalchemy import select
 
 from auth.security import enforce_route_permissions, principal_from_request, Principal
+from auth.tenant_context import set_tenant
 from config.settings import settings
 from database.auth_models import ServiceAccount, Tenant
 from database.session import AsyncSessionLocal
@@ -33,11 +34,7 @@ async def _service_account_principal(token: str) -> Optional[Principal]:
         result = await session.execute(
             select(ServiceAccount, Tenant)
             .join(Tenant, Tenant.id == ServiceAccount.tenant_id)
-            .where(
-                ServiceAccount.token_hash == token_hash,
-                ServiceAccount.is_active.is_(True),
-                Tenant.is_active.is_(True),
-            )
+            .where(ServiceAccount.token_hash == token_hash, ServiceAccount.is_active.is_(True), Tenant.is_active.is_(True))
         )
         row = result.first()
         if not row:
@@ -48,30 +45,18 @@ async def _service_account_principal(token: str) -> Optional[Principal]:
             return None
         account.last_used_at = now
         await session.commit()
-        return Principal(
-            user_id=f"service:{account.id}",
-            email=f"service:{account.name}",
-            tenant_id=account.tenant_id,
-            role=account.role,
-            tenant_name=tenant.name,
-        )
+        return Principal(user_id=f"service:{account.id}", email=f"service:{account.name}", tenant_id=account.tenant_id, role=account.role, tenant_name=tenant.name)
 
 
 async def require_api_key(
     request: Request,
     x_api_key: Optional[str] = Header(default=None, alias="X-API-Key"),
 ) -> str:
-    """Authenticate a session or a tenant-bound machine credential.
-
-    The legacy global API_KEY is intentionally not accepted for production
-    traffic.  Service accounts carry their tenant identity server-side.
-    """
+    """Authenticate a human session or tenant-bound machine credential."""
     try:
         principal = await principal_from_request(request)
     except HTTPException as session_error:
-        principal = None
-        if x_api_key:
-            principal = await _service_account_principal(x_api_key)
+        principal = await _service_account_principal(x_api_key) if x_api_key else None
         if principal is None:
             if settings.is_test:
                 return "test"
@@ -79,6 +64,7 @@ async def require_api_key(
 
     request.state.principal = principal
     request.state.tenant_id = principal.tenant_id
+    request.state.tenant_context_token = set_tenant(principal.tenant_id)
     _inject_tenant_header(request, principal.tenant_id)
     enforce_route_permissions(request, principal)
     return principal.user_id
