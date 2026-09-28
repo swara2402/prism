@@ -13,7 +13,7 @@ _TENANT_MODELS = (dbm.Incident, dbm.InvestigationJob)
 
 
 @event.listens_for(Session, "before_flush")
-def _enforce_tenant_on_flush(session: Session, flush_context, instances) -> None:
+def _enforce_tenant_on_flush(session: Session, _flush_context, instances) -> None:
     trusted = get_tenant()
     for obj in session.new:
         if not isinstance(obj, _TENANT_MODELS):
