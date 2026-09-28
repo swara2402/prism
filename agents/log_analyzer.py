@@ -17,8 +17,8 @@ _LOG_SCHEMA = {
 class LogAnalyzerAgent(BaseAgent):
     """Extract structured log evidence and produce bounded hypotheses.
 
-    The LLM can rank evidence-backed hypotheses, but cannot manufacture the
-    evidence or turn an inference into confirmed truth.
+    The LLM may rank an existing hypothesis, but it cannot manufacture a
+    hypothesis, evidence ID, or confirmed root cause.
     """
 
     name = "log_analyzer"
@@ -30,37 +30,74 @@ class LogAnalyzerAgent(BaseAgent):
     @staticmethod
     def _rule_hypotheses(evidence: CompressedEvidence) -> List[Dict[str, Any]]:
         hypotheses: List[Dict[str, Any]] = []
-        event_ids = {e.line: e.evidence_id for e in evidence.events}
 
-        def add(name: str, rationale: str, lines: List[str], score: float) -> None:
-            ids = [event_ids[line] for line in lines if line in event_ids]
+        def add(name: str, rationale: str, events: List[Any], score: float) -> None:
+            ids = list(dict.fromkeys(event.evidence_id for event in events))[:8]
             if ids:
-                hypotheses.append({
-                    "hypothesis": name,
-                    "rationale": rationale,
-                    "evidence_ids": ids[:8],
-                    "support_score": min(0.90, max(0.0, score)),
-                })
+                hypotheses.append(
+                    {
+                        "hypothesis": name,
+                        "rationale": rationale,
+                        "evidence_ids": ids,
+                        "support_score": min(0.90, max(0.0, score)),
+                    }
+                )
 
-        critical = evidence.critical_events
-        failures = evidence.api_failures
-        deploys = [e.line for e in evidence.events if any(x in e.line.lower() for x in ("deploy", "deployment", "release"))]
-        refused = [line for line in failures if "refused" in line.lower()]
-        timeouts = [line for line in failures if "timeout" in line.lower()]
-        server_errors = [line for line in failures if any(x in line for x in ("500", "503", "5xx"))]
-        oom = [line for line in critical if "oom" in line.lower() or "out of memory" in line.lower()]
+        critical_events = [e for e in evidence.events if e.line in evidence.critical_events]
+        failure_events = [
+            e for e in evidence.events
+            if e.line in evidence.api_failures
+        ]
+        deploy_events = [
+            e for e in evidence.events
+            if any(token in e.line.lower() for token in ("deploy", "deployment", "release"))
+        ]
+        refused = [e for e in failure_events if "refused" in e.line.lower()]
+        timeouts = [e for e in failure_events if "timeout" in e.line.lower()]
+        server_errors = [
+            e for e in failure_events
+            if any(token in e.line.lower() for token in ("500", "503", "5xx"))
+        ]
+        oom = [
+            e for e in critical_events
+            if "oom" in e.line.lower() or "out of memory" in e.line.lower()
+        ]
 
         if oom:
-            add("Memory exhaustion (OOM) in an affected service.", "OOM/error evidence is present in the logs.", oom, 0.78)
+            add(
+                "Memory exhaustion (OOM) in an affected service.",
+                "OOM/error evidence is directly present in the logs.",
+                oom,
+                0.78,
+            )
         if refused and server_errors:
-            ids = refused + server_errors
-            add("A downstream dependency failure likely contributed to service errors.", "Connection refusal precedes HTTP 5xx evidence.", ids, 0.76)
+            add(
+                "A downstream dependency failure likely contributed to service errors.",
+                "Connection refusal precedes HTTP 5xx evidence in the supplied logs.",
+                refused + server_errors,
+                0.76,
+            )
         if timeouts:
-            add("An upstream dependency timeout likely contributed to the incident.", "Timeout events are directly observed in the logs.", timeouts, 0.68)
-        if deploys and (critical or server_errors):
-            add("A recent deployment may have introduced a regression.", "A deployment marker is temporally near error evidence.", deploys + critical + server_errors, 0.62)
+            add(
+                "An upstream dependency timeout likely contributed to the incident.",
+                "Timeout events are directly observed in the supplied logs.",
+                timeouts,
+                0.68,
+            )
+        if deploy_events and (critical_events or server_errors):
+            add(
+                "A recent deployment may have introduced a regression.",
+                "A deployment marker is temporally near error evidence.",
+                deploy_events + critical_events + server_errors,
+                0.62,
+            )
         if server_errors:
-            add("The application is returning internal server errors.", "HTTP 5xx responses are directly observed.", server_errors, 0.60)
+            add(
+                "The application is returning internal server errors.",
+                "HTTP 5xx responses are directly observed.",
+                server_errors,
+                0.60,
+            )
         return hypotheses
 
     async def investigate(self, context: Dict[str, Any]) -> FindingPayload:
@@ -78,8 +115,6 @@ class LogAnalyzerAgent(BaseAgent):
         rule_hypotheses = self._rule_hypotheses(evidence)
         hypotheses = [item["hypothesis"] for item in rule_hypotheses]
 
-        # Model output is advisory. It may select an existing hypothesis and
-        # cite existing evidence IDs, but it cannot create a new root cause.
         selected = rule_hypotheses[0] if rule_hypotheses else None
         llm_selected: str | None = None
         llm_evidence_ids: List[str] = []
@@ -92,42 +127,56 @@ class LogAnalyzerAgent(BaseAgent):
                     f"HYPOTHESES: {rule_hypotheses}",
                     system=(
                         "You are an SRE reviewer. A hypothesis is an inference, not confirmed truth. "
-                        "Only select an exact supplied hypothesis and cite only supplied evidence IDs."
+                        "Only select an exact supplied hypothesis and cite only evidence IDs belonging "
+                        "to that exact supplied hypothesis. Never claim confirmation."
                     ),
                     schema=_LOG_SCHEMA,
                     evidence=evidence.to_prompt(max_chars=3500),
                 )
                 if parsed:
                     candidate = str(parsed.get("selected_hypothesis") or "")
-                    valid = next((item for item in rule_hypotheses if item["hypothesis"] == candidate), None)
-                    supplied_ids = {e.evidence_id for e in evidence.events}
-                    cited = [str(x) for x in parsed.get("evidence_ids", []) if str(x) in supplied_ids]
-                    if valid and cited:
-                        selected = valid
-                        llm_selected = candidate
-                        llm_evidence_ids = cited[:8]
-                        llm_confidence = min(float(parsed.get("confidence", 0.0)), 0.90)
+                    valid = next(
+                        (item for item in rule_hypotheses if item["hypothesis"] == candidate),
+                        None,
+                    )
+                    if valid:
+                        allowed_ids = set(valid["evidence_ids"])
+                        cited = [
+                            str(value)
+                            for value in parsed.get("evidence_ids", [])
+                            if str(value) in allowed_ids
+                        ]
+                        # The model must cite at least one piece of evidence
+                        # belonging to the selected hypothesis. Otherwise its
+                        # selection is advisory only and the deterministic rule
+                        # result remains authoritative.
+                        if cited:
+                            selected = valid
+                            llm_selected = candidate
+                            llm_evidence_ids = list(dict.fromkeys(cited))[:8]
+                            llm_confidence = min(float(parsed.get("confidence", 0.0)), 0.90)
             except Exception:
                 # Rule-based evidence remains authoritative when the optional LLM fails.
                 pass
 
         confidence = selected["support_score"] if selected else 0.15
-        if llm_selected and llm_confidence:
+        if llm_selected and llm_confidence > 0.0:
             confidence = min(confidence, llm_confidence, 0.90)
 
         root_cause_hint = selected["hypothesis"] if selected else None
+        supporting_ids = llm_evidence_ids or (selected["evidence_ids"] if selected else [])
         evidence_payload = {
             "events": [
                 {
-                    "evidence_id": e.evidence_id,
-                    "timestamp": e.timestamp,
-                    "severity": e.severity,
-                    "severity_score": e.severity_score,
-                    "services": e.services,
-                    "apis": e.apis,
-                    "excerpt": e.line,
+                    "evidence_id": event.evidence_id,
+                    "timestamp": event.timestamp,
+                    "severity": event.severity,
+                    "severity_score": event.severity_score,
+                    "services": event.services,
+                    "apis": event.apis,
+                    "excerpt": event.line,
                 }
-                for e in evidence.events[:100]
+                for event in evidence.events[:100]
             ],
             "critical_events": evidence.critical_events,
             "anomalies": evidence.anomalies,
@@ -137,7 +186,7 @@ class LogAnalyzerAgent(BaseAgent):
             "apis": evidence.apis,
             "pattern_counts": dict(list(evidence.pattern_counts.items())[:20]),
             "temporal_correlations": evidence.temporal_correlations,
-            "supporting_evidence_ids": (llm_evidence_ids or (selected["evidence_ids"] if selected else [])),
+            "supporting_evidence_ids": supporting_ids,
             "epistemic_status": "inference" if selected else "insufficient_evidence",
             "llm_selected": llm_selected,
         }
