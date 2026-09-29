@@ -50,4 +50,4 @@ services:
         value: "2"
 
 previews:
-  generation: none
+  generation: off
