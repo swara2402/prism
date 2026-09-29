@@ -25,6 +25,6 @@ USER appuser
 EXPOSE 8000
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
-    CMD curl -fsS http://localhost:8000/health || exit 1
+    CMD ["python", "-c", "import os, socket; s=socket.create_connection(('127.0.0.1', int(os.getenv('PORT', '8000'))), 4); s.close()"]
 
 CMD ["python", "-c", "import os, uvicorn; uvicorn.run('main:app', host='0.0.0.0', port=int(os.getenv('PORT', '8000')))"]
