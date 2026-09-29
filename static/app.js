@@ -738,6 +738,9 @@ function renderVerdict(res) {
   const chain = rc.causal_chain || [];
   const factors = rc.contributing_factors || [];
   const agents = res.agents_used || [];
+  const evidence = exp.evidence_used || [];
+  const agentStatuses = res.agent_statuses || [];
+  const runtime = res.runtime || {};
 
   const confMeter = `
     <div class="conf-meter">
@@ -769,6 +772,37 @@ function renderVerdict(res) {
       </div>`).join("")
     : `<p class="hint">No alternative hypotheses ranked.</p>`;
 
+  const evidenceHtml = evidence.length
+    ? '<div class="evidence-grid">' + evidence.slice(0, 12).map((item, i) => {
+        const source = item.source || item.agent || item.type || item.kind || "Evidence";
+        const detail = item.detail || item.description || item.summary || item.value || item.evidence || "";
+        const score = item.confidence ?? item.weight ?? item.relevance;
+        return '<article class="evidence-card">' +
+          '<div class="evidence-top"><span class="evidence-index">' + String(i + 1).padStart(2, "0") + '</span>' +
+          '<span class="evidence-source">' + esc(source) + '</span>' +
+          (score != null ? '<span class="evidence-score">' + pct(Number(score)) + '%</span>' : '') + '</div>' +
+          '<div class="evidence-detail">' + esc(typeof detail === "object" ? JSON.stringify(detail) : detail) + '</div></article>';
+      }).join("") + '</div>'
+    : '<div class="empty-inline">No structured evidence was returned by the explainability engine.</div>';
+
+  const agentStatusHtml = agentStatuses.length
+    ? '<div class="agent-investigation-grid">' + agentStatuses.map((a) => {
+        const status = a.status || "unknown";
+        return '<div class="agent-investigation-card agent-' + esc(status) + '">' +
+          '<div class="agent-investigation-head"><span class="agent-state-dot"></span>' +
+          '<b>' + esc(a.agent_name || "unknown") + '</b><span class="agent-status-label">' + esc(status) + '</span></div>' +
+          '<div class="agent-investigation-meta"><span>' + esc(a.finding_type || "analysis") + '</span>' +
+          '<span>' + Number(a.execution_ms || 0).toFixed(0) + ' ms</span></div></div>';
+      }).join("") + '</div>'
+    : '<div class="empty-inline">Agent execution telemetry was not returned.</div>';
+
+  const suggestions = meta.suggestions || [];
+  const suggestionsHtml = suggestions.length
+    ? '<div class="action-list">' + suggestions.map((s, i) =>
+        '<div class="action-item"><span>' + (i + 1) + '</span><p>' + esc(s) + '</p></div>'
+      ).join("") + '</div>'
+    : '<div class="empty-inline">No operational suggestions were returned for this investigation.</div>';
+
   const finalExplanation = exp.final_explanation || rc.explanation || "No explanation available.";
 
   return `
@@ -784,17 +818,30 @@ function renderVerdict(res) {
         </div>
       </div>
 
-      <div class="root-cause-box">
-        <div class="root-cause-text">
-          <div class="rc-label">Root cause</div>
-          <div class="rc-value">${esc(rc.root_cause || "—")}</div>
+      <div class="verdict-overview-grid">
+        <div class="root-cause-box">
+          <div class="root-cause-text">
+            <div class="rc-label">Primary root cause</div>
+            <div class="rc-value">${esc(rc.root_cause || "—")}</div>
+          </div>
+          <div class="root-cause-meter">${confMeter}</div>
         </div>
-        <div class="root-cause-meter">${confMeter}</div>
+        <div class="verdict-signal-card">
+          <span class="rc-label">Investigation signal</span>
+          <strong>${agents.length || agentStatuses.length}</strong>
+          <span>agents used</span>
+          <div class="signal-foot">${agentStatuses.filter((a) => a.status === "ok").length} healthy · ${agentStatuses.filter((a) => a.status === "failed").length} degraded</div>
+        </div>
       </div>
 
-      <div class="drawer-section">
-        <span class="sec-label">Causal chain</span>
+      <div class="drawer-section verdict-section">
+        <div class="section-heading-row"><span class="sec-label">Causal path</span><span class="hint">How evidence converged</span></div>
         ${chainHtml}
+      </div>
+
+      <div class="drawer-section verdict-section">
+        <div class="section-heading-row"><span class="sec-label">Evidence used</span><span class="hint">${evidence.length} structured item${evidence.length === 1 ? "" : "s"}</span></div>
+        ${evidenceHtml}
       </div>
 
       <div class="drawer-section">
@@ -812,9 +859,14 @@ function renderVerdict(res) {
         <div class="explanation-text">${esc(finalExplanation)}</div>
       </div>
 
-      <div class="drawer-section">
-        <span class="sec-label">Agents used</span>
-        <div class="agent-chips">${agents.map((a) => `<span class="agent-chip">${esc(a)}</span>`).join("") || `<span class="hint">—</span>`}</div>
+      <div class="drawer-section verdict-section">
+        <div class="section-heading-row"><span class="sec-label">Agent analysis</span><span class="hint">Execution status and latency</span></div>
+        ${agentStatusHtml}
+      </div>
+
+      <div class="drawer-section verdict-section">
+        <div class="section-heading-row"><span class="sec-label">Operational suggestions</span><span class="hint">Advisory only</span></div>
+        ${suggestionsHtml}
       </div>
 
       <div class="drawer-section">
@@ -826,6 +878,7 @@ function renderVerdict(res) {
             ${meta.suggestions?.length ? `<div class="meta-row"><b>Suggestions</b><span>${meta.suggestions.map((s) => `· ${esc(s)}`).join("<br>")}</span></div>` : ""}
             ${meta.agent_scores && Object.keys(meta.agent_scores).length ? `<div class="meta-row"><b>Agent scores</b><div class="agent-chips" style="margin-top:6px">${Object.entries(meta.agent_scores).map(([k, v]) => `<span class="agent-chip">${esc(k)} <b style="color:var(--accent-strong)">${Number(v).toFixed(2)}</b></span>`).join("")}</div></div>` : ""}
             ${meta.unnecessary_agents?.length ? `<div class="meta-row"><b>Unnecessary agents</b>${meta.unnecessary_agents.map((a) => `<span class="agent-chip" style="margin-left:6px">${esc(a)}</span>`).join("")}</div>` : ""}
+            ${Object.keys(runtime).length ? `<div class="meta-row"><b>Runtime</b><span class="runtime-grid">${Object.entries(runtime).slice(0, 8).map(([k,v]) => `<span><i>${esc(k)}</i>${esc(v)}</span>`).join("")}</span></div>` : ""}
           </div>
         </details>
       </div>
