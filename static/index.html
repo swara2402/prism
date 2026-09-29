@@ -121,6 +121,17 @@
 
       <!-- ===== OVERVIEW ===== -->
       <section class="view active" data-view="overview" id="view-overview">
+        <div class="demo-hero">
+          <div>
+            <span class="demo-kicker">PRISM INCIDENT COMMAND</span>
+            <h2>Turn production evidence into an explainable root cause.</h2>
+            <p>Run a guided incident scenario to see agents, evidence convergence, causal reasoning and confidence in one flow.</p>
+          </div>
+          <div class="demo-actions">
+            <button class="btn btn-primary" id="overview-demo"><svg class="ic"><use href="#i-run"/></svg>Run demo investigation</button>
+            <button class="btn btn-ghost" id="overview-investigate">Custom investigation</button>
+          </div>
+        </div>
         <div class="stats-grid" id="ov-stats"></div>
         <div class="grid-2">
           <div class="panel">
@@ -140,6 +151,15 @@
       <!-- ===== INVESTIGATE ===== -->
       <section class="view" data-view="investigate" id="view-investigate">
         <div id="inv-form-wrap">
+          <div class="demo-callout">
+              <div>
+                <span class="demo-kicker">FAST DEMO</span>
+                <strong>Not sure what to enter?</strong>
+                <span>Load a realistic incident with logs, metrics and traces automatically.</span>
+              </div>
+              <button type="button" class="btn btn-ghost" id="investigate-demo"><svg class="ic"><use href="#i-run"/></svg>Load demo scenario</button>
+            </div>
+          </div>
           <div class="panel form-panel">
             <div class="panel-head">
               <span class="sec-label">New incident</span>
