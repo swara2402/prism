@@ -1,0 +1,40 @@
+name: Container Smoke
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  container-runtime:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        run: docker build --pull -t prism-ci .
+      - name: Start container
+        run: |
+          docker run -d --rm --name prism-smoke \
+            -e APP_ENV=test \
+            -e DATABASE_URL=sqlite+aiosqlite:///./prism-container.db \
+            -e DATABASE_SYNC_URL=sqlite:///./prism-container.db \
+            -e ENABLE_NEO4J=false \
+            -e ENABLE_OLLAMA=false \
+            -e ENABLE_FAISS=false \
+            -e LEARNING_MODE=frozen \
+            -e PORT=18000 \
+            -p 18000:18000 \
+            prism-ci
+      - name: Check health endpoint
+        run: |
+          trap 'docker logs prism-smoke || true; docker stop prism-smoke || true' EXIT
+          for i in {1..30}; do
+            if curl -fsS http://127.0.0.1:18000/health; then exit 0; fi
+            sleep 2
+          done
+          exit 1
