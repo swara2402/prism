@@ -673,6 +673,7 @@ function finishPipeline(res) {
   logStreamLine(`pipeline returned in ${Number(res.duration_seconds).toFixed(1)}s · ${res.agents_used?.length || 0} agents used`, "ls-acc");
   $("#verdict-wrap").classList.remove("hidden");
   $("#verdict-wrap").innerHTML = renderVerdict(res);
+  setupCausalGraph($("#verdict-wrap"), (res.root_cause?.causal_chain || []));
   const conf = Number(res.root_cause?.confidence || 0);
   animateConfidence(conf);
   investigateState = { running: false, payload: null };
@@ -729,6 +730,37 @@ function logStreamLine(text, cls) {
   stream.scrollTop = stream.scrollHeight;
 }
 
+
+function renderCausalGraph(chain) {
+  const nodes = (chain || []).map((n, i) => ({...n,index:i,label:n.label||n.node_id||"Unknown node",confidence:Number(n.confidence||0),kind:n.kind||"finding"}));
+  if (!nodes.length) return '<div class="causal-empty">No causal graph was returned for this investigation.</div>';
+  const cols=Math.min(5,Math.max(3,Math.ceil(Math.sqrt(nodes.length)))), rows=Math.ceil(nodes.length/cols), W=cols*210+70, H=rows*145+70;
+  const pos=nodes.map((n,i)=>({x:55+(i%cols)*210,y:55+Math.floor(i/cols)*145}));
+  const edgeHtml=nodes.slice(1).map((n,i)=>{const a=pos[i],b=pos[i+1];return '<path class="causal-edge" d="M '+a.x+' '+a.y+' L '+b.x+' '+b.y+'" marker-end="url(#causal-arrow)"></path>';}).join("");
+  const nodeHtml=nodes.map((n,i)=>{const p=pos[i], confidence=Math.max(0,Math.min(1,n.confidence)), lines=String(n.label).match(/.{1,22}/g)||["Unknown"];
+    const textLines=lines.slice(0,2).map((line,j)=>'<tspan x="'+p.x+'" dy="'+(j?15:0)+'">'+esc(line)+'</tspan>').join("");
+    return '<g class="causal-node" tabindex="0" role="button" aria-label="Inspect '+esc(n.label)+'" data-causal-index="'+i+'" transform="translate('+p.x+' '+p.y+')">'+
+      '<circle r="25" class="causal-node-ring"></circle><circle r="18" class="causal-node-core" style="stroke-dasharray:'+(113*confidence).toFixed(1)+' 113"></circle>'+
+      '<text class="causal-node-num" y="4">'+(i+1)+'</text><text class="causal-node-label" y="48">'+textLines+'</text>'+
+      '<text class="causal-node-kind" y="82">'+esc(n.kind)+' · '+pct(confidence)+'%</text></g>';
+  }).join("");
+  return '<div class="causal-graph-shell"><div class="causal-graph-toolbar"><div><b>Evidence convergence map</b><span>Click a node to inspect its contribution to the root cause.</span></div>'+
+    '<div class="causal-graph-actions"><button class="icon-btn causal-zoom" data-causal-zoom="-1" aria-label="Zoom out">−</button><button class="icon-btn causal-zoom" data-causal-zoom="1" aria-label="Zoom in">+</button><button class="icon-btn causal-zoom" data-causal-reset="1" aria-label="Reset zoom">⟳</button></div></div>'+
+    '<div class="causal-graph-viewport"><svg class="causal-svg" viewBox="0 0 '+W+' '+H+'" role="img" aria-label="Interactive causal path"><defs><marker id="causal-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="currentColor"></path></marker></defs><g class="causal-zoom-layer">'+edgeHtml+nodeHtml+'</g></svg>'+
+    '<div class="causal-inspector" data-causal-inspector><div class="causal-inspector-empty">Select a node to inspect it.</div></div></div></div>';
+}
+function setupCausalGraph(root, chain) {
+  const svg=root.querySelector(".causal-svg"), layer=root.querySelector(".causal-zoom-layer"), inspector=root.querySelector("[data-causal-inspector]");
+  if(!svg||!layer||!inspector)return;
+  let zoom=1; const renderZoom=()=>layer.setAttribute("transform","scale("+zoom+")");
+  const inspect=(index)=>{const n=chain[index];if(!n)return;root.querySelectorAll(".causal-node").forEach(el=>el.classList.toggle("selected",Number(el.dataset.causalIndex)===index));
+    inspector.innerHTML='<div class="causal-inspector-kicker">NODE '+String(index+1).padStart(2,"0")+'</div><div class="causal-inspector-title">'+esc(n.label||n.node_id||"Unknown")+'</div>'+
+      '<div class="causal-inspector-grid"><span><i>type</i><b>'+esc(n.kind||"finding")+'</b></span><span><i>confidence</i><b>'+pct(n.confidence)+'%</b></span><span><i>source</i><b>'+esc(n.source_agent||"orchestrator")+'</b></span><span><i>node id</i><b>'+esc(n.node_id||"—")+'</b></span></div>';};
+  root.querySelectorAll(".causal-node").forEach(node=>{node.addEventListener("click",()=>inspect(Number(node.dataset.causalIndex)));node.addEventListener("keydown",e=>{if(e.key==="Enter"||e.key===" "){e.preventDefault();inspect(Number(node.dataset.causalIndex));}});});
+  root.querySelectorAll("[data-causal-zoom]").forEach(btn=>btn.addEventListener("click",()=>{zoom=Math.max(.65,Math.min(1.8,zoom+Number(btn.dataset.causalZoom)*.15));renderZoom();}));
+  root.querySelector("[data-causal-reset]")?.addEventListener("click",()=>{zoom=1;renderZoom();}); renderZoom(); if(chain.length)inspect(chain.length-1);
+}
+
 function renderVerdict(res) {
   const rc = res.root_cause || {};
   const exp = res.explanation || {};
@@ -749,19 +781,7 @@ function renderVerdict(res) {
       <div class="bar-track" style="height:9px"><div class="bar-fill ${confCls(conf)}" id="verdict-bar" style="width:0%"></div></div>
     </div>`;
 
-  const chainHtml = chain.length
-    ? `<div class="timeline">${chain.map((n) => `
-        <div class="timeline-item">
-          <span class="timeline-dot"><svg class="ic"><use href="#i-chevron"/></svg></span>
-          <div class="timeline-label">${esc(n.label || n.node_id || "—")}</div>
-          <div class="timeline-meta">
-            <span>node <b>${esc(trunc(n.node_id, 10))}</b></span>
-            <span>kind <b>${esc(n.kind || "—")}</b></span>
-            <span>conf <b>${pct(n.confidence)}%</b></span>
-            ${n.source_agent ? `<span>src <b>${esc(n.source_agent)}</b></span>` : ""}
-          </div>
-        </div>`).join("")}</div>`
-    : `<p class="hint">No causal chain nodes were produced.</p>`;
+  const chainHtml = renderCausalGraph(chain);
 
   const altsHtml = alts.length
     ? alts.map((a) => `
@@ -818,6 +838,13 @@ function renderVerdict(res) {
         </div>
       </div>
 
+      <div class="incident-command-strip">
+        <div><span>SEVERITY</span><strong>${esc(res.severity || "—")}</strong></div>
+        <div><span>TYPE</span><strong>${esc(res.incident_type || "—")}</strong></div>
+        <div><span>AGENTS</span><strong>${agents.length || agentStatuses.length}</strong></div>
+        <div><span>DURATION</span><strong>${Number(res.duration_seconds || 0).toFixed(1)}s</strong></div>
+        <div class="incident-services"><span>AFFECTED SERVICES</span><div>${(res.affected_services || []).map((s) => '<span class="chip">' + esc(s) + '</span>').join("") || '<span class="hint">—</span>'}</div></div>
+      </div>
       <div class="verdict-overview-grid">
         <div class="root-cause-box">
           <div class="root-cause-text">
