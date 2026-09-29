@@ -474,6 +474,15 @@ function applyPreset(key) {
   });
 }
 
+function openDemoInvestigation() {
+  navigate("investigate");
+  setTimeout(() => {
+    applyPreset("db_pool");
+    toast("Demo incident loaded. Run the investigation when ready.", { type: "info", title: "PRISM demo" });
+    $("#inv-title")?.focus();
+  }, 50);
+}
+
 function initInvestigate() {
   const svcEl = $("#inv-services");
   invServices = tagInput(svcEl, ["auth-svc", "gateway", "user-db"]);
@@ -485,6 +494,10 @@ function initInvestigate() {
   applyPreset("memory");
 
   $("#inv-run").addEventListener("click", runInvestigation);
+  $("#investigate-demo")?.addEventListener("click", () => {
+    applyPreset("db_pool");
+    toast("Demo scenario loaded with logs, metrics and traces.", { type: "success", title: "Ready to run" });
+  });
 }
 
 async function runInvestigation() {
@@ -679,6 +692,19 @@ function finishPipeline(res) {
   investigateState = { running: false, payload: null };
   $("#inv-run").disabled = false;
   state.incidentsDirty = true;
+  const newBtn = document.createElement("button");
+  newBtn.className = "btn btn-ghost";
+  newBtn.id = "inv-new-after-success";
+  newBtn.textContent = "Start another investigation";
+  newBtn.onclick = () => {
+    investigateState = null;
+    $("#inv-run-wrap").classList.add("hidden");
+    $("#inv-form-wrap").classList.remove("hidden");
+    $("#inv-run").disabled = false;
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  };
+  const command = $(".incident-command-strip", $("#verdict-wrap"));
+  if (command) command.appendChild(newBtn);
 }
 
 function animateConfidence(conf) {
@@ -710,13 +736,22 @@ function failPipeline(err) {
     <div class="error-state" style="margin-top:20px">
       <svg class="ic"><use href="#i-alert"/></svg>
       <div><b>Investigation failed</b><span>${esc(err.message)}</span></div>
-      <button class="btn btn-ghost" id="inv-retry">Try again</button>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <button class="btn btn-primary" id="inv-retry">Try again</button>
+        <button class="btn btn-ghost" id="inv-new">New investigation</button>
+      </div>
     </div>`;
   $("#inv-retry").onclick = () => {
-    if (payload) { 
-      investigateState = { running: false, payload }; 
-      runInvestigation(); 
+    if (payload) {
+      investigateState = { running: false, payload };
+      runInvestigation();
     }
+  };
+  $("#inv-new").onclick = () => {
+    investigateState = null;
+    $("#inv-run-wrap").classList.add("hidden");
+    $("#inv-form-wrap").classList.remove("hidden");
+    $("#inv-run").disabled = false;
   };
   investigateState = { running: false, payload };
   $("#inv-run").disabled = false;
@@ -1835,6 +1870,8 @@ function init() {
   wireGlobal();
   initSettings();
   initInvestigate();
+  $("#overview-demo")?.addEventListener("click", openDemoInvestigation);
+  $("#overview-investigate")?.addEventListener("click", () => navigate("investigate"));
   initIncidents();
   initMemory();
   initPatterns();
