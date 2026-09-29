@@ -1567,3 +1567,52 @@ select option { background: var(--surface-2); color: var(--text); }
 .empty-inline{padding:14px;border:1px dashed var(--border-strong);border-radius:8px;color:var(--text-faint);font-size:11.5px;text-align:center}
 @media (max-width:820px){.verdict-overview-grid{grid-template-columns:1fr}.evidence-grid{grid-template-columns:1fr}.agent-investigation-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media (max-width:560px){.agent-investigation-grid{grid-template-columns:1fr}.runtime-grid{grid-template-columns:1fr}}
+
+
+/* Interactive incident command dashboard */
+.incident-command-strip{display:grid;grid-template-columns:repeat(4,minmax(90px,1fr)) minmax(210px,2fr);gap:1px;margin-top:18px;border:1px solid var(--border);border-radius:var(--radius);overflow:hidden;background:var(--border)}
+.incident-command-strip>div{min-width:0;padding:12px 14px;background:rgba(255,255,255,.025)}
+.incident-command-strip span{display:block;color:var(--text-faint);font:9px var(--mono);letter-spacing:.12em}
+.incident-command-strip strong{display:block;margin-top:5px;color:var(--text);font:600 14px var(--mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.incident-services>div{display:flex;gap:5px;flex-wrap:wrap;margin-top:6px}
+.incident-services .chip{margin:0;font-size:9px;padding:3px 7px}
+
+/* Causal graph */
+.causal-graph-shell{border:1px solid var(--border);border-radius:var(--radius);background:rgba(0,0,0,.12);overflow:hidden}
+.causal-graph-toolbar{display:flex;align-items:center;justify-content:space-between;gap:14px;padding:12px 14px;border-bottom:1px solid var(--border)}
+.causal-graph-toolbar b{display:block;color:var(--text);font-size:12.5px}
+.causal-graph-toolbar span{display:block;margin-top:3px;color:var(--text-faint);font-size:10.5px}
+.causal-graph-actions{display:flex;gap:5px;flex:0 0 auto}
+.causal-graph-actions .icon-btn{width:29px;height:29px;font-family:var(--mono)}
+.causal-graph-viewport{position:relative;min-height:390px;background:radial-gradient(520px 260px at 45% 30%,rgba(34,211,238,.045),transparent 70%);overflow:auto}
+.causal-svg{display:block;width:100%;min-width:620px;height:390px;color:var(--accent-strong);user-select:none}
+.causal-edge{fill:none;stroke:rgba(148,163,184,.35);stroke-width:2}
+.causal-node{cursor:pointer;outline:none}
+.causal-node-ring{fill:rgba(34,211,238,.035);stroke:rgba(148,163,184,.35);stroke-width:1.5}
+.causal-node-core{fill:var(--surface);stroke:var(--accent-strong);stroke-width:3;transform:rotate(-90deg);transform-origin:center}
+.causal-node-num{fill:var(--text);font:700 11px var(--mono);text-anchor:middle}
+.causal-node-label{fill:var(--text);font:600 11px var(--mono);text-anchor:middle}
+.causal-node-kind{fill:var(--text-faint);font:9px var(--mono);text-anchor:middle}
+.causal-node:hover .causal-node-ring,.causal-node.selected .causal-node-ring,.causal-node:focus .causal-node-ring{stroke:var(--accent-strong);stroke-width:2.5}
+.causal-node.selected .causal-node-core{fill:var(--accent-tint)}
+.causal-inspector{position:absolute;right:12px;bottom:12px;width:min(285px,calc(100% - 24px));padding:11px 13px;border:1px solid var(--border-strong);border-radius:9px;background:rgba(10,14,20,.94);backdrop-filter:blur(8px);box-shadow:0 12px 30px rgba(0,0,0,.35)}
+.causal-inspector-empty{color:var(--text-faint);font-size:11px}
+.causal-inspector-kicker{color:var(--accent-strong);font:9px var(--mono);letter-spacing:.12em}
+.causal-inspector-title{margin-top:4px;color:var(--text);font:600 12.5px var(--mono);line-height:1.4}
+.causal-inspector-grid{display:grid;grid-template-columns:1fr 1fr;gap:7px;margin-top:9px}
+.causal-inspector-grid span{display:flex;flex-direction:column;gap:2px;min-width:0}
+.causal-inspector-grid i{color:var(--text-faint);font:9px var(--mono);font-style:normal;text-transform:uppercase}
+.causal-inspector-grid b{color:var(--text-dim);font:10px var(--mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.causal-empty{padding:20px;border:1px dashed var(--border-strong);border-radius:var(--radius-sm);color:var(--text-faint);text-align:center;font-size:11.5px}
+
+@media (max-width:820px){
+  .incident-command-strip{grid-template-columns:repeat(2,1fr)}
+  .incident-services{grid-column:1/-1}
+}
+@media (max-width:560px){
+  .incident-command-strip{grid-template-columns:1fr 1fr}
+  .incident-command-strip>div{padding:10px}
+  .causal-graph-toolbar{align-items:flex-start}
+  .causal-graph-toolbar>div:first-child{min-width:0}
+  .causal-inspector{position:relative;right:auto;bottom:auto;margin:0 12px 12px;width:auto}
+}
