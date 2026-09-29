@@ -1616,3 +1616,18 @@ select option { background: var(--surface-2); color: var(--text); }
   .causal-graph-toolbar>div:first-child{min-width:0}
   .causal-inspector{position:relative;right:auto;bottom:auto;margin:0 12px 12px;width:auto}
 }
+
+
+/* Demo-first UX */
+.demo-hero{display:flex;align-items:center;justify-content:space-between;gap:24px;padding:22px 24px;margin-bottom:18px;border:1px solid var(--border-strong);border-radius:var(--radius);background:radial-gradient(500px 180px at 20% 0%,rgba(34,211,238,.09),transparent 70%),rgba(255,255,255,.018)}
+.demo-kicker{display:block;color:var(--accent-strong);font:700 9px var(--mono);letter-spacing:.14em}
+.demo-hero h2{margin:7px 0 6px;font-size:20px;line-height:1.25;letter-spacing:-.02em}
+.demo-hero p{max-width:690px;margin:0;color:var(--text-dim);font-size:12px;line-height:1.55}
+.demo-actions{display:flex;gap:8px;flex:0 0 auto}
+.demo-callout{display:flex;align-items:center;justify-content:space-between;gap:18px;padding:14px 16px;margin-bottom:14px;border:1px dashed var(--border-strong);border-radius:var(--radius-sm);background:rgba(34,211,238,.025)}
+.demo-callout>div{display:flex;flex-direction:column;gap:3px}
+.demo-callout strong{font-size:12px}
+.demo-callout span:last-child{color:var(--text-faint);font-size:11px}
+#inv-new-after-success{margin-left:auto}
+@media(max-width:820px){.demo-hero{align-items:flex-start;flex-direction:column}.demo-actions{width:100%}.demo-actions .btn{flex:1}.demo-callout{align-items:flex-start;flex-direction:column}}
+@media(max-width:560px){.demo-hero{padding:18px}.demo-hero h2{font-size:17px}.demo-actions{flex-direction:column}.demo-callout .btn{width:100%}}
