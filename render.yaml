@@ -1,0 +1,53 @@
+services:
+  - type: web
+    name: prism
+    runtime: docker
+    plan: free
+    region: singapore
+    branch: main
+    autoDeploy: true
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /health
+    envVars:
+      - key: APP_ENV
+        value: production
+      - key: APP_LOG_LEVEL
+        value: INFO
+      - key: API_KEY
+        generateValue: true
+      - key: PRISM_JWT_SECRET
+        generateValue: true
+      - key: PRISM_SESSION_HOURS
+        value: "8"
+      - key: PRISM_BOOTSTRAP_EMAIL
+        sync: false
+      - key: PRISM_BOOTSTRAP_PASSWORD
+        sync: false
+      - key: PRISM_BOOTSTRAP_TENANT_NAME
+        value: PRISM Workspace
+      - key: CORS_ORIGINS
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: DATABASE_SYNC_URL
+        sync: false
+      - key: NEO4J_PASSWORD
+        generateValue: true
+      - key: ENABLE_NEO4J
+        value: "false"
+      - key: ENABLE_OLLAMA
+        value: "false"
+      - key: ENABLE_FAISS
+        value: "false"
+      - key: LEARNING_MODE
+        value: frozen
+      - key: LEARNING_REQUIRE_CONFIRMATION
+        value: "true"
+      - key: REQUIRE_TENANT_HEADER
+        value: "true"
+      - key: MAX_CONCURRENT_INVESTIGATIONS
+        value: "2"
+
+previews:
+  generation: none
