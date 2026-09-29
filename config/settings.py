@@ -63,6 +63,29 @@ class Settings(BaseSettings):
     api_key_min_length: int = 32
     cors_origins: str = Field(default="")
 
+    @field_validator("database_url", mode="before")
+    @classmethod
+    def _normalize_async_database_url(cls, v: str) -> str:
+        # Render exposes PostgreSQL URLs with the generic postgres scheme.
+        # SQLAlchemy async engines need the asyncpg driver explicitly.
+        value = str(v or "")
+        if value.startswith("postgres://"):
+            return "postgresql+asyncpg://" + value[len("postgres://"):]
+        if value.startswith("postgresql://"):
+            return "postgresql+asyncpg://" + value[len("postgresql://"):]
+        return value
+
+    @field_validator("database_sync_url", mode="before")
+    @classmethod
+    def _normalize_sync_database_url(cls, v: str) -> str:
+        # Alembic uses a synchronous SQLAlchemy engine for migrations.
+        value = str(v or "")
+        if value.startswith("postgres://"):
+            return "postgresql+psycopg2://" + value[len("postgres://"):]
+        if value.startswith("postgresql://"):
+            return "postgresql+psycopg2://" + value[len("postgresql://"):]
+        return value
+
     max_concurrent_investigations: int = 3
     investigation_rate_limit: str = "10/minute"
     require_tenant_header: bool = False
