@@ -61,6 +61,10 @@ class LearningInput:
     """
 
     incident_id: str
+    #: Tenant that owns the incident. Learning writes into tenant-scoped
+    #: tables (patterns, agent reliability, lessons), so this is required:
+    #: without it those writes cannot be scoped and are refused.
+    tenant_id: Optional[str]
     root_cause: Optional[str]
     confidence: float
     affected_services: List[str]
@@ -96,7 +100,7 @@ async def _update_pattern_library(
     )
     if not patterns:
         return []
-    return await persist_patterns(incident_id, patterns)
+    return await persist_patterns(incident_id, patterns, tenant_id=inp.tenant_id)
 
 
 async def _update_knowledge_graph(inp: LearningInput, rc: str) -> None:
@@ -147,7 +151,7 @@ async def _update_agent_reliability(inp: LearningInput, rc: str) -> bool:
             predicted_positive = conf >= 0.4
             actually_positive = sim >= 0.3
 
-            ar = await upsert_agent_reliability(session, agent)
+            ar = await upsert_agent_reliability(session, agent, tenant_id=inp.tenant_id)
             ar.invocations = (ar.invocations or 0) + 1
             if predicted_positive and actually_positive:
                 ar.true_positives = (ar.true_positives or 0) + 1
@@ -179,7 +183,7 @@ async def _update_agent_reliability(inp: LearningInput, rc: str) -> bool:
 
 async def _update_memory(inp: LearningInput, rc: str) -> None:
     """Add the confirmed incident to the semantic incident memory."""
-    store = MemoryStore.get()
+    store = MemoryStore.get(inp.tenant_id)
     text_repr = (
         f"Title: {inp.incident_id}\n"
         f"Root cause: {rc}\n"
@@ -195,10 +199,11 @@ async def _update_memory(inp: LearningInput, rc: str) -> None:
         confidence=inp.confidence,
         lessons=inp.lessons or [],
         services=inp.affected_services,
+        tenant_id=inp.tenant_id,
     )
 
 
-async def _persist_lessons(incident_id: str, lessons: Sequence[str]) -> None:
+async def _persist_lessons(incident_id: str, lessons: Sequence[str], *, tenant_id: str | None) -> None:
     if not lessons:
         return
     from database.session import AsyncSessionLocal
@@ -208,6 +213,7 @@ async def _persist_lessons(incident_id: str, lessons: Sequence[str]) -> None:
             await add_lesson(
                 session,
                 incident_id=incident_id,
+                tenant_id=tenant_id,
                 lesson=lesson,
                 category="confirmed_resolution",
                 confidence=0.9,
@@ -230,6 +236,15 @@ async def learn_from_incident(inp: LearningInput) -> Dict[str, Any]:
         logger.info("learning_skipped_frozen", extra=summary)
         return summary
 
+    # Learning writes into tenant-scoped tables, so a run without a tenant
+    # could not be attributed to anyone. Refuse rather than write unscoped.
+    if not inp.tenant_id:
+        summary["reason"] = "missing_tenant"
+        logger.info(
+            "learning_skipped_missing_tenant", extra={"incident_id": inp.incident_id}
+        )
+        return summary
+
     rc = confirmed_root_cause(inp)
     if settings.learning_require_confirmation and not rc:
         summary["reason"] = "unconfirmed_incident"
@@ -250,7 +265,7 @@ async def learn_from_incident(inp: LearningInput) -> Dict[str, Any]:
     await _update_knowledge_graph(inp, rc)
     reliability_updated = await _update_agent_reliability(inp, rc)
     await _update_memory(inp, rc)
-    await _persist_lessons(inp.incident_id, inp.lessons or [])
+    await _persist_lessons(inp.incident_id, inp.lessons or [], tenant_id=inp.tenant_id)
 
     summary.update(
         {

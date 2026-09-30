@@ -72,7 +72,7 @@ def extract_patterns(logs: Sequence[str], root_cause: str, confidence: float,
 async def _incident_belongs_to_tenant(session: Any, incident_id: str, tenant_id: str | None) -> bool:
     from database import models as dbm
     incident = await session.get(dbm.Incident, incident_id)
-    return incident is not None and (tenant_id is None or incident.tenant_id == tenant_id)
+    return incident is not None and incident.tenant_id == tenant_id
 
 
 async def persist_patterns(incident_id: str, patterns: Sequence[GeneratedPattern], *, tenant_id: str | None = None) -> List[str]:
@@ -106,18 +106,6 @@ async def persist_patterns(incident_id: str, patterns: Sequence[GeneratedPattern
     return created
 
 
-async def _tenant_pattern_ids(session: Any, tenant_id: str | None, rows: Sequence[Any]) -> set[str]:
-    if tenant_id is None:
-        return {p.id for p in rows}
-    allowed: set[str] = set()
-    for p in rows:
-        for incident_id in p.incident_ids or []:
-            if await _incident_belongs_to_tenant(session, incident_id, tenant_id):
-                allowed.add(p.id)
-                break
-    return allowed
-
-
 async def approve_pattern_by_id(pattern_id: str, approver: str, *, tenant_id: str | None = None) -> bool:
     from database.session import AsyncSessionLocal
     from database import models as dbm
@@ -136,9 +124,11 @@ async def approve_pattern_by_id(pattern_id: str, approver: str, *, tenant_id: st
 async def match_approved_patterns(logs: Sequence[str], *, tenant_id: str | None = None) -> List[Dict[str, Any]]:
     from database.session import AsyncSessionLocal
     async with AsyncSessionLocal() as session:
-        approved = await list_approved_patterns(session)
-        allowed_ids = await _tenant_pattern_ids(session, tenant_id, approved)
-        approved = [p for p in approved if p.id in allowed_ids]
+        # Scoped in the query. The previous version loaded every tenant's
+        # approved patterns and then ran a per-pattern, per-incident existence
+        # check in Python -- O(patterns x incidents) round trips, on a hot
+        # path, before the first log line could be matched.
+        approved = await list_approved_patterns(session, tenant_id=tenant_id)
 
     sig_to_pattern: Dict[str, Any] = {p.pattern_signature: p for p in approved}
     matches: List[Dict[str, Any]] = []

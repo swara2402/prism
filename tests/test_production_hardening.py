@@ -38,27 +38,6 @@ os.environ.setdefault("ENABLE_OLLAMA", "false")
 _AUTH = {"X-API-Key": "test-api-key-that-is-long-enough-32chars"}
 
 
-@pytest.fixture
-def client():
-    """FastAPI TestClient with initialized in-memory DB (purge + lifespan)."""
-    for mod in list(sys.modules.keys()):
-        if mod.startswith(("config", "database", "main", "api")):
-            del sys.modules[mod]
-
-    from fastapi.testclient import TestClient
-    from database.session import Base, engine
-    from main import app
-
-    async def _init():
-        async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
-
-    asyncio.run(_init())
-
-    with TestClient(app, headers=_AUTH) as c:
-        yield c
-
-
 def _run_loop(coro):
     loop = asyncio.new_event_loop()
     try:

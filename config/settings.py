@@ -6,6 +6,7 @@ Centralized configuration for WayPoint.
 """
 from __future__ import annotations
 
+import secrets
 import sys
 from functools import lru_cache
 from pathlib import Path
@@ -24,12 +25,22 @@ _WEAK_PASSWORDS = {
     "123456", "password123",
 }
 
+# Used only where no PRISM_JWT_SECRET is configured AND the environment is
+# development/test (every other environment refuses to start). Random per
+# process, so nothing is forgeable and nothing is shared between deployments.
+_EPHEMERAL_JWT_SECRET = secrets.token_urlsafe(48)
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=str(PROJECT_ROOT / ".env"),
         env_file_encoding="utf-8",
         case_sensitive=False,
+        # Without this, a field declared with an alias (e.g. jwt_secret /
+        # PRISM_JWT_SECRET) can only be set through the alias: passing the
+        # Python name to Settings(...) is silently dropped rather than
+        # raising, so a caller gets an empty secret and no error.
+        populate_by_name=True,
         extra="ignore",
     )
 
@@ -63,6 +74,15 @@ class Settings(BaseSettings):
     api_key_min_length: int = 32
     cors_origins: str = Field(default="")
 
+    # Session/credential material. These are declared here rather than read via
+    # ``os.getenv`` at their point of use: the settings loader reads ``.env``
+    # into this object and never mutates ``os.environ``, so a secret supplied
+    # only in ``.env`` would otherwise be invisible.
+    jwt_secret: str = Field(default="", alias="PRISM_JWT_SECRET")
+    jwt_secret_min_length: int = 32
+    session_hours: int = 8
+    password_min_length: int = 12
+
     @field_validator("database_url", mode="before")
     @classmethod
     def _normalize_async_database_url(cls, v: str) -> str:
@@ -88,7 +108,10 @@ class Settings(BaseSettings):
 
     max_concurrent_investigations: int = 3
     investigation_rate_limit: str = "10/minute"
-    require_tenant_header: bool = False
+    # Tenant context is always enforced; the flag is retained only so existing
+    # deployments fail loudly rather than silently reopening the boundary.
+    require_tenant_header: bool = True
+    max_service_accounts_per_tenant: int = 25
     redis_url: str = ""
     max_affected_services: int = 50
     max_log_lines: int = 500
@@ -120,6 +143,11 @@ class Settings(BaseSettings):
     consensus_confidence_threshold: float = 0.6
     causal_max_depth: int = 10
     causal_min_confidence: float = 0.1
+    propagation_iterations: int = 5
+    # When consensus is undetermined, promote the highest-confidence graph
+    # traversal candidate. Previously both call sites hardcoded False, which
+    # left apply_graph_traversal_fallback permanently dead code.
+    graph_traversal_fallback: bool = False
     memory_top_k: int = 5
     memory_similarity_threshold: float = 0.5
 
@@ -147,6 +175,17 @@ class Settings(BaseSettings):
     @property
     def is_test(self) -> bool:
         return self.app_env.lower() in {"test", "testing"}
+
+    @property
+    def is_local(self) -> bool:
+        """Environments where relaxed credential rules are acceptable.
+
+        Anything that is not an explicitly local environment -- including
+        unknown values such as ``staging``, ``preview`` or a typo -- is
+        validated. Validating only on the literal string ``production`` let
+        misconfigured deploy targets start with placeholder secrets.
+        """
+        return self.app_env.lower() in {"development", "dev", "local", "test", "testing"}
 
     @property
     def data_dir(self) -> Path:
@@ -189,17 +228,34 @@ class Settings(BaseSettings):
             return True
         return value.strip().lower() in _WEAK_PASSWORDS
 
+    @property
+    def signing_secret(self) -> str:
+        """The key actually used to sign and verify session JWTs.
+
+        Non-local environments are validated at startup, so this always returns
+        the configured secret there. In development/test, an unset secret yields
+        a random per-process key instead of an empty string: signing with ``""``
+        raises ``InvalidKeyError: HMAC key must not be empty`` deep inside PyJWT,
+        and any hardcoded fallback would silently make every deployment share a
+        publicly known signing key.
+        """
+        if self.jwt_secret:
+            return self.jwt_secret
+        return _EPHEMERAL_JWT_SECRET
+
     def validate_production_secrets(self) -> None:
-        if not self.is_production:
+        if self.is_local:
             return
 
         errors: List[str] = []
-        if not self.api_key:
-            errors.append("API_KEY is not configured")
-        elif len(self.api_key) < self.api_key_min_length:
-            errors.append(f"API_KEY is too short (min {self.api_key_min_length} characters)")
-        elif self._is_weak_secret(self.api_key):
-            errors.append("API_KEY is still set to a placeholder/default value")
+        if not self.jwt_secret:
+            errors.append("PRISM_JWT_SECRET is not configured")
+        elif len(self.jwt_secret) < self.jwt_secret_min_length:
+            errors.append(
+                f"PRISM_JWT_SECRET is too short (min {self.jwt_secret_min_length} characters)"
+            )
+        elif self._is_weak_secret(self.jwt_secret):
+            errors.append("PRISM_JWT_SECRET is still set to a placeholder/default value")
 
         for name, url in (("DATABASE_URL", self.database_url), ("DATABASE_SYNC_URL", self.database_sync_url)):
             password = self._url_password(url)

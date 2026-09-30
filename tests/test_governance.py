@@ -30,29 +30,6 @@ os.environ.setdefault("ENABLE_OLLAMA", "false")
 os.environ.setdefault("ENABLE_FAISS", "false")
 
 
-@pytest.fixture
-def client():
-    """Provide a FastAPI TestClient with an initialized in-memory DB + auth."""
-    for mod in list(sys.modules.keys()):
-        if mod.startswith(("config", "database", "main", "api")):
-            del sys.modules[mod]
-
-    from fastapi.testclient import TestClient
-    from database.session import Base, engine
-    from main import app
-
-    import asyncio
-
-    async def _init():
-        async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
-
-    asyncio.run(_init())
-
-    with TestClient(app, headers={"X-API-Key": "test-api-key-that-is-long-enough-32chars"}) as c:
-        yield c
-
-
 _SAMPLE_PAYLOAD = {
     "title": "Governance test incident",
     "severity": "P2",

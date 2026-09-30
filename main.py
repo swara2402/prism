@@ -159,7 +159,12 @@ async def readiness() -> Response:
     error: str | None = None
     try:
         from database.session import get_async_session_local
-        async with get_async_session_local() as session:
+        # get_async_session_local() returns the *factory*; it has to be called
+        # to get a session. Using the factory itself as the context manager
+        # raised TypeError ("does not support the asynchronous context manager
+        # protocol"), so /ready reported 503 even with a healthy database.
+        session_local = get_async_session_local()
+        async with session_local() as session:
             await session.execute(text("SELECT 1"))
         checks["database"] = True
     except Exception as exc:

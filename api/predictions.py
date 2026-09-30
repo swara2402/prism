@@ -12,7 +12,7 @@ from typing import Dict, List, Optional, cast
 from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel, Field
 
-from api.deps import require_api_key
+from api.deps import require_api_key, require_tenant
 from config.settings import settings
 from database.repositories import list_predictions
 from models.schemas import PredictionOut
@@ -35,12 +35,14 @@ class RunPredictionsIn(BaseModel):
 async def run_predictions(
     body: RunPredictionsIn,
     _api_key: str = Depends(require_api_key),
+    tenant: str = Depends(require_tenant),
 ) -> List[PredictionOut]:
     """Run a new prediction pass. The prediction engine owns persistence."""
     preds = await predict(
         service_filter=body.service_filter,
         recent_anomalies=body.recent_anomalies,
         topology_dependents=body.topology_dependents,
+        tenant_id=tenant,
     )
     return [
         PredictionOut(
@@ -62,6 +64,7 @@ async def run_predictions(
 async def list_preds(
     limit: int = Query(default=50, ge=1, le=settings.max_prediction_batch),
     _api_key: str = Depends(require_api_key),
+    tenant: str = Depends(require_tenant),
 ) -> List[PredictionOut]:
     """Read predictions without mutating application state.
 
@@ -72,5 +75,5 @@ async def list_preds(
     from database.session import AsyncSessionLocal
 
     async with AsyncSessionLocal() as session:
-        rows = await list_predictions(session, limit=limit)
+        rows = await list_predictions(session, limit=limit, tenant_id=tenant)
     return [PredictionOut.model_validate(r) for r in rows]

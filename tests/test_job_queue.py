@@ -33,27 +33,6 @@ os.environ.setdefault("ENABLE_OLLAMA", "false")
 _AUTH = {"X-API-Key": "test-api-key-that-is-long-enough-32chars"}
 
 
-@pytest.fixture
-def client():
-    """FastAPI TestClient with an initialized in-memory DB (isolated modules)."""
-    for mod in list(sys.modules.keys()):
-        if mod.startswith(("config", "database", "main", "api", "utils.job_queue")):
-            del sys.modules[mod]
-
-    from fastapi.testclient import TestClient
-    from database.session import Base, engine
-    from main import app
-
-    async def _init():
-        async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
-
-    asyncio.run(_init())
-
-    with TestClient(app, headers=_AUTH) as c:
-        yield c
-
-
 def _run_loop(coro):
     loop = asyncio.new_event_loop()
     try:
@@ -89,7 +68,10 @@ def _make_payload(**overrides):
     return payload
 
 
-async def _enqueue(db_session, key=None, tenant=None, attempts_max=3):
+_TENANT = "jobq-tenant"
+
+
+async def _enqueue(db_session, key=None, tenant=_TENANT, attempts_max=3):
     from database.repositories import create_job
 
     job = await create_job(
@@ -117,7 +99,7 @@ async def test_worker_completes_job(db_session):
     jid = await LocalWorker(runner=_runner).process_once()
     assert jid == job_id
 
-    job = await get_job(db_session, job_id)
+    job = await get_job(db_session, job_id, tenant_id=_TENANT)
     assert job.status == "completed"
     assert job.result_incident_id == "INC-COMPLETED-1"
     assert job.progress == 1.0
@@ -142,7 +124,7 @@ async def test_worker_retries_then_dead_letters(db_session):
 
     # Attempt 1 fails -> requeued with future next_attempt_at (backoff).
     await worker.process_once()
-    job = await get_job(db_session, job_id)
+    job = await get_job(db_session, job_id, tenant_id=_TENANT)
     assert job.status == "queued"
     assert job.attempts == 1
     assert job.error and "RuntimeError" in job.error
@@ -152,7 +134,7 @@ async def test_worker_retries_then_dead_letters(db_session):
 
     # Backoff has not elapsed => claim must skip the job.
     assert await worker.process_once() is None
-    job = await get_job(db_session, job_id)
+    job = await get_job(db_session, job_id, tenant_id=_TENANT)
     assert job.attempts == 1
 
     # Force the backoff window to expire.
@@ -168,7 +150,7 @@ async def test_worker_retries_then_dead_letters(db_session):
     # Attempt 2 fails -> terminal (attempts == attempts_max).
     r3 = await worker.process_once()
     print("DBG call3 returned:", r3)
-    job = await get_job(db_session, job_id)
+    job = await get_job(db_session, job_id, tenant_id=_TENANT)
     print("DBG after3:", job.status, job.attempts, job.attempts_max, job.error)
 
 
@@ -178,10 +160,17 @@ async def test_cancelled_job_is_never_claimed(db_session):
     from utils.job_queue import LocalWorker
 
     job_id = await _enqueue(db_session)
-    assert await cancel_job(db_session, job_id) is True
+    # cancel_job reports (performed_transition, job) so a no-op cancel is
+    # distinguishable from a real one.
+    cancelled, _job = await cancel_job(db_session, job_id, tenant_id=_TENANT)
+    assert cancelled is True
     await db_session.commit()
 
-    assert (await get_job(db_session, job_id)).status == "cancelled"
+    # Cancelling again is a no-op, not a second successful transition.
+    again, _ = await cancel_job(db_session, job_id, tenant_id=_TENANT)
+    assert again is False
+
+    assert (await get_job(db_session, job_id, tenant_id=_TENANT)).status == "cancelled"
     assert await LocalWorker(runner=lambda payload: "cancelled?").process_once() is None
 
 
@@ -192,12 +181,23 @@ async def test_job_idempotency_key_is_unique(db_session):
     from database.repositories import create_job
 
     await create_job(
-        db_session, tenant_id=None, idempotency_key="dup-key", payload=_make_payload()
+        db_session, tenant_id=_TENANT, idempotency_key="dup-key", payload=_make_payload()
     )
     await db_session.commit()
     with pytest.raises(IntegrityError):
         await create_job(
-            db_session, tenant_id=None, idempotency_key="dup-key", payload=_make_payload()
+            db_session, tenant_id=_TENANT, idempotency_key="dup-key", payload=_make_payload()
+        )
+
+
+@pytest.mark.asyncio
+async def test_create_job_fails_closed_without_a_tenant(db_session):
+    """A job with no tenant could never be listed, scoped or cancelled."""
+    from database.repositories import create_job
+
+    with pytest.raises(ValueError, match="tenant"):
+        await create_job(
+            db_session, tenant_id=None, idempotency_key="no-tenant", payload=_make_payload()
         )
 
 
@@ -244,29 +244,31 @@ def test_async_enqueue_returns_202_and_replays_key(client):
     assert job["status"] == "queued"
 
 
-def test_async_endpoint_tenant_scoping(client):
-    tenant_header = {**_AUTH, "X-Tenant-Id": "acme"}
-    r = client.post(
-        "/incidents/investigate/async",
-        json=_ENQUEUE_PAYLOAD,
-        headers=tenant_header,
-    )
+def test_async_endpoint_tenant_scoping(tenant_clients):
+    """Tenant scope follows the credential, never a client-supplied header.
+
+    Uses two real service accounts in two different tenants, because that is
+    the only way to prove isolation now that ``X-Tenant-Id`` is ignored.
+    """
+    a, b = tenant_clients["tenant-a"], tenant_clients["tenant-b"]
+
+    r = a.post("/incidents/investigate/async", json=_ENQUEUE_PAYLOAD)
     assert r.status_code == 202, r.text
     job_id = r.json()["id"]
 
     # Tenant A sees its own job...
-    assert client.get(f"/incidents/jobs/{job_id}", headers=tenant_header).status_code == 200
+    assert a.get(f"/incidents/jobs/{job_id}").status_code == 200
     # ...tenant B cannot see or cancel it.
-    other = {**_AUTH, "X-Tenant-Id": "globex"}
-    assert client.get(f"/incidents/jobs/{job_id}", headers=other).status_code == 404
-    assert (
-        client.post(f"/incidents/jobs/{job_id}/cancel", headers=other).status_code == 404
-    )
-    # Lists are scoped too.
-    assert client.get("/incidents/jobs", headers=other).json() == []
-    # Soft scoping: a caller WITHOUT a tenant header (default tenant) sees the
-    # scoped job; auth-layer enforcement requires REQUIRE_TENANT_HEADER=true.
-    assert client.get(f"/incidents/jobs/{job_id}", headers=_AUTH).status_code == 200
+    assert b.get(f"/incidents/jobs/{job_id}").status_code == 404
+    assert b.post(f"/incidents/jobs/{job_id}/cancel").status_code == 404
+    # Lists are scoped too: B's list is empty, A's holds exactly its own job.
+    assert b.get("/incidents/jobs").json() == []
+    assert [j["id"] for j in a.get("/incidents/jobs").json()] == [job_id]
+
+    # A caller cannot widen its scope by asserting a different tenant.
+    spoofed = {**a.headers, "X-Tenant-Id": "tenant-b"}
+    assert a.get(f"/incidents/jobs/{job_id}", headers=spoofed).status_code == 200
+    assert b.get(f"/incidents/jobs/{job_id}", headers={"X-Tenant-Id": "tenant-a"}).status_code == 404
 
 
 def test_job_cancel(client):

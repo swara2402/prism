@@ -78,10 +78,15 @@ class Incident(Base, TimestampMixin):
     __tablename__ = "incidents"
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid_str)
+    # Tenant ownership. Always populated on the write path; the read path
+    # filters on it unconditionally, so a NULL row is never returned to a
+    # tenant-scoped caller.
+    tenant_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
     title: Mapped[str] = mapped_column(String(512), nullable=False)
     description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     severity: Mapped[str] = mapped_column(String(32), default="P3")
-    status: Mapped[str] = mapped_column(String(32), default="open")  # open|investigating|resolved
+    # open|investigating|analyzed|resolved
+    status: Mapped[str] = mapped_column(String(32), default="open")
     incident_type: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
     affected_services: Mapped[List[str]] = mapped_column(JSONBOrJSON, default=list, nullable=False)
     raw_logs: Mapped[List[str]] = mapped_column(JSONBOrJSON, default=list, nullable=False)
@@ -92,16 +97,13 @@ class Incident(Base, TimestampMixin):
     started_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     resolved_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     # Client-supplied idempotency key: same key + same incident => no duplicate
-    # work.  Unique so concurrent requests can never claim the same key onto
-    # two different incident rows (the duplicate request is replayed, see
-    # api.investigation._run_investigation).
-    idempotency_key: Mapped[Optional[str]] = mapped_column(
-        String(128), nullable=True, index=True, unique=True
+    # work.  Unique *per tenant* -- a global constraint let one workspace
+    # permanently claim a key and deny it to every other workspace, and made
+    # the key a cross-tenant lookup vector.
+    idempotency_key: Mapped[Optional[str]] = mapped_column(String(128), nullable=True, index=True)
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "idempotency_key", name="_tenant_incident_idem_uc"),
     )
-    # Optional multi-tenant scoping (Phase 4).  Null == default tenant, so
-    # existing deployments are unaffected.  Read paths filter on this column
-    # when the ``X-Tenant-Id`` header is supplied.
-    tenant_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
 
     findings: Mapped[List["Finding"]] = relationship(
         back_populates="incident", cascade="all, delete-orphan"
@@ -126,6 +128,10 @@ class Finding(Base, TimestampMixin):
     incident_id: Mapped[str] = mapped_column(
         String(32), ForeignKey("incidents.id", ondelete="CASCADE"), index=True
     )
+    # Denormalised from the parent incident. Findings are always reached via
+    # incident_id, but the tenant predicate cannot join on every read without
+    # paying for it on the hot list_findings path, so it is carried inline.
+    tenant_id: Mapped[str] = mapped_column(String(64), index=True)
     agent_name: Mapped[str] = mapped_column(String(128), index=True)
     finding_type: Mapped[str] = mapped_column(String(128))
     description: Mapped[str] = mapped_column(Text)
@@ -145,6 +151,7 @@ class RootCause(Base, TimestampMixin):
     incident_id: Mapped[str] = mapped_column(
         String(32), ForeignKey("incidents.id", ondelete="CASCADE"), unique=True, index=True
     )
+    tenant_id: Mapped[str] = mapped_column(String(64), index=True)
     root_cause: Mapped[str] = mapped_column(Text, nullable=False)
     confidence: Mapped[float] = mapped_column(Float, default=0.0)
     alternatives: Mapped[List[dict]] = mapped_column(JSONBOrJSON, default=list, nullable=False)
@@ -164,6 +171,7 @@ class Resolution(Base, TimestampMixin):
     incident_id: Mapped[str] = mapped_column(
         String(32), ForeignKey("incidents.id", ondelete="CASCADE"), unique=True, index=True
     )
+    tenant_id: Mapped[str] = mapped_column(String(64), index=True)
     action: Mapped[str] = mapped_column(Text, nullable=False)
     steps: Mapped[List[str]] = mapped_column(JSONBOrJSON, default=list, nullable=False)
     verified: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -181,6 +189,9 @@ class LessonLearned(Base, TimestampMixin):
     incident_id: Mapped[str] = mapped_column(
         String(32), ForeignKey("incidents.id", ondelete="CASCADE"), index=True
     )
+    # Lessons carry resolution detail, so they are tenant-scoped like every
+    # other incident-owned record.
+    tenant_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
     lesson: Mapped[str] = mapped_column(Text, nullable=False)
     category: Mapped[str] = mapped_column(String(128), default="general")
     confidence: Mapped[float] = mapped_column(Float, default=0.5)
@@ -201,6 +212,7 @@ class Pattern(Base, TimestampMixin):
     __tablename__ = "patterns"
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid_str)
+    tenant_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
     pattern_signature: Mapped[str] = mapped_column(String(256), index=True)
     pattern_text: Mapped[str] = mapped_column(Text, nullable=False)
     root_cause_hint: Mapped[str] = mapped_column(Text, nullable=False)
@@ -225,6 +237,7 @@ class IncidentMemory(Base, TimestampMixin):
     incident_id: Mapped[str] = mapped_column(
         String(32), ForeignKey("incidents.id", ondelete="CASCADE"), index=True
     )
+    tenant_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
     text_repr: Mapped[str] = mapped_column(Text, nullable=False)
     embedding: Mapped[List[float]] = mapped_column(JSONBOrJSON, default=list, nullable=False)
     root_cause: Mapped[str] = mapped_column(Text, nullable=False)
@@ -242,8 +255,14 @@ class AgentReliability(Base, TimestampMixin):
 
     __tablename__ = "agent_reliability"
 
-    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    id: Mapped[str] = mapped_column(String(64), primary_key=True, default=_uuid_str)
     agent_name: Mapped[str] = mapped_column(String(128), index=True)
+    # Reliability is a per-workspace signal: a tenant's agent performance
+    # history must not be visible to, or writable by, any other tenant.
+    tenant_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "agent_name", name="_tenant_agent_uc"),
+    )
     accuracy: Mapped[float] = mapped_column(Float, default=0.5)
     precision: Mapped[float] = mapped_column(Float, default=0.5)
     recall: Mapped[float] = mapped_column(Float, default=0.5)
@@ -264,10 +283,16 @@ class Prediction(Base, TimestampMixin):
     __tablename__ = "predictions"
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid_str)
+    tenant_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
     service: Mapped[str] = mapped_column(String(128), index=True)
     predicted_failure_type: Mapped[str] = mapped_column(String(256))
+    # Uniqueness is per tenant. A global constraint would let one workspace
+    # block another from ever using the same service/failure pair, and would
+    # make per-tenant upserts collide across workspaces.
     __table_args__ = (
-        UniqueConstraint("service", "predicted_failure_type", name="_service_predicted_failure_type_uc"),
+        UniqueConstraint(
+            "tenant_id", "service", "predicted_failure_type", name="_tenant_service_failure_uc"
+        ),
     )
     probability: Mapped[float] = mapped_column(Float, default=0.0)
     estimated_time_minutes: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
@@ -292,9 +317,10 @@ class InvestigationJob(Base, TimestampMixin):
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid_str)
     tenant_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
     # Same idempotency-key semantics as incidents: same key + same payload
-    # must never create two jobs.
-    idempotency_key: Mapped[Optional[str]] = mapped_column(
-        String(128), nullable=True, index=True, unique=True
+    # must never create two jobs. Unique per tenant for the same reason.
+    idempotency_key: Mapped[Optional[str]] = mapped_column(String(128), nullable=True, index=True)
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "idempotency_key", name="_tenant_job_idem_uc"),
     )
     status: Mapped[str] = mapped_column(  # queued|running|completed|failed|cancelled
         String(16), default="queued", nullable=False, index=True

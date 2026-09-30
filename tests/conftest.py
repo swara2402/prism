@@ -131,15 +131,194 @@ def _reset_learning_state():
     yield
 
 
+TEST_TENANT_ID = "test-tenant"
+TEST_USER_EMAIL = "test@waypoint.local"
+
+
 @pytest.fixture
 def api_headers():
     """Headers with valid test API key."""
     return {"X-API-Key": "test-api-key-that-is-long-enough-32chars"}
 
 
+def _test_principal(role: str = "owner", tenant_id: str = TEST_TENANT_ID):
+    from auth.security import Principal
+
+    return Principal(
+        user_id="test-user",
+        email=TEST_USER_EMAIL,
+        tenant_id=tenant_id,
+        role=role,
+        tenant_name="Test Workspace",
+        scopes=("read", "write", "admin"),
+    )
+
+
+def _install_auth_overrides(app, *, role: str = "owner", tenant_id: str = TEST_TENANT_ID):
+    """Authenticate every request as a synthetic principal.
+
+    Implemented with FastAPI's ``dependency_overrides`` so the decision lives in
+    the test that makes it. The previous environment-gated bypass in
+    ``require_api_key`` applied to every test in the process, which is why the
+    auth-rejection tests reported 200.
+    """
+    from api.deps import require_api_key, require_tenant
+
+    principal = _test_principal(role=role, tenant_id=tenant_id)
+
+    async def _fake_api_key():
+        return principal.user_id
+
+    async def _fake_tenant():
+        return principal.tenant_id
+
+    app.dependency_overrides[require_api_key] = _fake_api_key
+    app.dependency_overrides[require_tenant] = _fake_tenant
+    return principal
+
+
 @pytest.fixture
 def client(api_headers):
-    """FastAPI TestClient with auth headers helper."""
+    """Authenticated FastAPI TestClient.
+
+    Entered as a context manager so the app's lifespan actually runs: returning
+    a bare ``TestClient(app)`` skipped startup entirely, so no schema was
+    created and no stores were initialised.
+    """
     from fastapi.testclient import TestClient
     from main import app
-    return TestClient(app)
+
+    _install_auth_overrides(app)
+    try:
+        with TestClient(app) as c:
+            c.headers.update(api_headers)
+            yield c
+    finally:
+        app.dependency_overrides.clear()
+
+
+@pytest.fixture
+def anon_client():
+    """TestClient with the real authentication path and no credentials.
+
+    Use this for tests that assert 401/403: it is the only client that does not
+    have a principal injected.
+    """
+    from fastapi.testclient import TestClient
+    from main import app
+
+    app.dependency_overrides.clear()
+    with TestClient(app) as c:
+        yield c
+
+
+@pytest.fixture
+def sa_client(api_headers):
+    """TestClient authenticating with a real service-account token."""
+    from fastapi.testclient import TestClient
+    from main import app
+
+    app.dependency_overrides.clear()
+    with TestClient(app) as c:
+        # Provisioned lazily: the schema exists only after lifespan startup.
+        token = _provision_service_account_sync()
+        c.headers.update({"X-API-Key": token})
+        yield c
+
+
+def _provision_service_account_sync(
+    tenant_id: str = TEST_TENANT_ID,
+    *,
+    service_account_id: str = "sa-test",
+) -> str:
+    """Create a service account from synchronous code (TestClient context)."""
+    import asyncio
+    import hashlib
+    import secrets
+
+    from api.auth import SCOPES_BY_ROLE
+    from database.auth_models import ServiceAccount, Tenant
+    from database.session import AsyncSessionLocal
+
+    token = "prism_sa_" + secrets.token_urlsafe(32)
+
+    async def _make() -> None:
+        async with AsyncSessionLocal() as session:
+            existing = await session.get(Tenant, tenant_id)
+            if existing is None:
+                session.add(
+                    Tenant(
+                        id=tenant_id,
+                        name=f"Workspace {tenant_id}",
+                        is_active=True,
+                    )
+                )
+            session.add(
+                ServiceAccount(
+                    id=service_account_id,
+                    tenant_id=tenant_id,
+                    name="pytest",
+                    token_hash=hashlib.sha256(token.encode("utf-8")).hexdigest(),
+                    role="engineer",
+                    # Derived from the production role map so this fixture
+                    # cannot drift from the scopes the app actually enforces.
+                    scopes=list(SCOPES_BY_ROLE["engineer"]),
+                    is_active=True,
+                )
+            )
+            await session.commit()
+
+    asyncio.run(_make())
+    return token
+
+
+async def make_incident(
+    session,
+    incident_id: str,
+    *,
+    tenant_id: str = TEST_TENANT_ID,
+    title: str = "test incident",
+    **fields,
+):
+    """Insert a real ``Incident`` row.
+
+    Learning and pattern persistence verify tenant ownership against the stored
+    incident, so tests that exercise those paths need a real row rather than an
+    invented id.
+    """
+    from database import models as dbm
+
+    incident = dbm.Incident(
+        id=incident_id,
+        tenant_id=tenant_id,
+        title=title,
+        **{"affected_services": [], "raw_logs": [], **fields},
+    )
+    session.add(incident)
+    await session.flush()
+    return incident
+
+
+@pytest.fixture
+def tenant_clients():
+    from contextlib import ExitStack
+
+    from fastapi.testclient import TestClient
+    from main import app
+
+    app.dependency_overrides.clear()
+    tenants = ("tenant-a", "tenant-b")
+    with ExitStack() as stack:
+        # The first client enters lifespan, which creates the schema.
+        clients: dict[str, TestClient] = {}
+        for i, tenant_id in enumerate(tenants):
+            client = stack.enter_context(TestClient(app))
+            client.headers.update(
+                {
+                    "X-API-Key": _provision_service_account_sync(
+                        tenant_id, service_account_id=f"sa-{i}"
+                    )
+                }
+            )
+            clients[tenant_id] = client
+        yield clients

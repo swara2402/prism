@@ -5,7 +5,6 @@ from typing import List
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
-from sqlalchemy import select
 
 from api.deps import require_api_key
 from auth.security import principal_from_request
@@ -34,26 +33,22 @@ async def _principal(request: Request):
 
 
 async def _tenant_pattern_rows(request: Request, approved: bool) -> list:
-    """Return patterns whose source incidents belong to the authenticated tenant."""
+    """Return the authenticated tenant's patterns.
+
+    Previously this loaded *every* tenant's patterns and filtered the rows in
+    Python by re-querying the source incidents -- an unbounded read plus an
+    application-side join. The repository is tenant-scoped now, so the query
+    itself carries the predicate.
+    """
     p = await _principal(request)
-    from database import models as dbm
     from database.session import AsyncSessionLocal
 
     async with AsyncSessionLocal() as session:
-        rows = await (list_approved_patterns(session) if approved else list_pending_patterns(session))
-        incident_ids = {iid for row in rows for iid in (row.incident_ids or [])}
-        if not incident_ids:
-            return []
-        incidents = (
-            await session.execute(
-                select(dbm.Incident).where(
-                    dbm.Incident.id.in_(incident_ids),
-                    dbm.Incident.tenant_id == p.tenant_id,
-                )
-            )
-        ).scalars().all()
-        owned = {incident.id for incident in incidents}
-        return [row for row in rows if any(iid in owned for iid in (row.incident_ids or []))]
+        return await (
+            list_approved_patterns(session, tenant_id=p.tenant_id)
+            if approved
+            else list_pending_patterns(session, tenant_id=p.tenant_id)
+        )
 
 
 @router.get("/pending", response_model=List[PatternOut])

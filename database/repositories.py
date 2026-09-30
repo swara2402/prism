@@ -31,6 +31,17 @@ def _as_utc(value: Optional[datetime]) -> Optional[datetime]:
     return value.astimezone(timezone.utc)
 
 
+def _require_tenant(tenant_id: Optional[str], caller: str) -> str:
+    """Refuse to run an unscoped query.
+
+    A missing tenant must never be interpreted as "no filter": that turns an
+    omitted header (or a missed call site) into a cross-tenant read or write.
+    """
+    if not tenant_id:
+        raise ValueError(f"{caller} requires an explicit tenant_id; refusing an unscoped query")
+    return tenant_id
+
+
 def _title_tokens(title: str) -> set[str]:
     """Significant lowercase alphanumeric tokens (>=3 chars) of a title."""
     return {t for t in re.findall(r"[a-z0-9]+", (title or "").lower()) if len(t) >= 3}
@@ -77,19 +88,19 @@ async def get_similar_incident(
 
     Service overlap is prefiltered in SQL; title similarity is decided in
     Python via :func:`_mutually_similar` so two distinct incidents that merely
-    share a keyword are never collapsed into one row.  When ``tenant_id`` is
-    supplied, matches are restricted to that tenant.
+    share a keyword are never collapsed into one row.  Matches are always
+    restricted to ``tenant_id`` -- there is no unscoped mode.
     """
     window = timedelta(minutes=max(1, time_window_minutes))
+    tenant_id = _require_tenant(tenant_id, "get_similar_incident")
 
     if not affected_services:
         return None
 
-    conditions = or_(
-        *[dbm.Incident.affected_services.contains([svc]) for svc in affected_services]
+    conditions = and_(
+        or_(*[dbm.Incident.affected_services.contains([svc]) for svc in affected_services]),
+        dbm.Incident.tenant_id == tenant_id,
     )
-    if tenant_id:
-        conditions = and_(conditions, dbm.Incident.tenant_id == tenant_id)
     res = await session.execute(
         select(dbm.Incident).where(conditions).order_by(dbm.Incident.created_at.desc())
     )
@@ -98,7 +109,10 @@ async def get_similar_incident(
     now = datetime.now(timezone.utc)
     for cand in candidates:
         created = _as_utc(cand.created_at) or _as_utc(cand.started_at) or now
-        still_open = (cand.status or "") not in {"resolved", "closed"}
+        # The dedup window closes once an incident has been analyzed: without
+        # this an incident is mergeable forever, so every repeat run collides
+        # on the same row.
+        still_open = (cand.status or "") not in {"analyzed", "resolved", "closed"}
         if not still_open and (now - created) > window:
             continue
         if not _mutually_similar(cand.title, title):
@@ -110,6 +124,7 @@ async def get_similar_incident(
 
 
 async def create_incident(session: AsyncSession, *, tenant_id: Optional[str] = None, **kwargs: Any) -> dbm.Incident:
+    tenant_id = _require_tenant(tenant_id, "create_incident")
     # Deduplication check
     existing_incident = await get_similar_incident(
         session,
@@ -136,26 +151,35 @@ async def get_incident(
     *,
     tenant_id: Optional[str] = None,
 ) -> Optional[dbm.Incident]:
+    tenant_id = _require_tenant(tenant_id, "get_incident")
     inc = await session.get(dbm.Incident, incident_id)
-    if inc is None or (tenant_id and inc.tenant_id != tenant_id):
+    if inc is None or inc.tenant_id != tenant_id:
         return None
     return inc
 
 
 async def get_incident_by_idempotency_key(
     session: AsyncSession,
-    idempotency_key: str,
+    idempotency_key: Optional[str],
     *,
     tenant_id: Optional[str] = None,
 ) -> Optional[dbm.Incident]:
-    """Look up an incident previously created under the same idempotency key."""
+    """Look up an incident previously created under the same idempotency key.
+
+    Scoped to the caller's tenant: an unscoped lookup would let a client that
+    reuses an ``Idempotency-Key`` (a normal retry pattern) read another
+    tenant's stored investigation result.
+    """
+    if not idempotency_key:
+        return None
+    tenant_id = _require_tenant(tenant_id, "get_incident_by_idempotency_key")
     res = await session.execute(
-        select(dbm.Incident).where(
-            and_(
-                dbm.Incident.idempotency_key == idempotency_key,
-                dbm.Incident.tenant_id == tenant_id if tenant_id else True,
-            )
-        ).order_by(dbm.Incident.created_at.desc())
+        select(dbm.Incident)
+        .where(
+            dbm.Incident.idempotency_key == idempotency_key,
+            dbm.Incident.tenant_id == tenant_id,
+        )
+        .order_by(dbm.Incident.created_at.desc())
     )
     return res.scalars().first()
 
@@ -166,32 +190,95 @@ async def list_incidents(
     *,
     tenant_id: Optional[str] = None,
 ) -> Sequence[dbm.Incident]:
-    stmt = select(dbm.Incident)
-    if tenant_id:
-        stmt = stmt.where(dbm.Incident.tenant_id == tenant_id)
+    tenant_id = _require_tenant(tenant_id, "list_incidents")
+    stmt = select(dbm.Incident).where(dbm.Incident.tenant_id == tenant_id)
     res = await session.execute(stmt.order_by(dbm.Incident.created_at.desc()).limit(limit))
     return res.scalars().all()
 
 
-async def update_incident(session: AsyncSession, incident_id: str, **fields: Any) -> None:
+async def get_incidents_by_ids(
+    session: AsyncSession,
+    incident_ids: Sequence[str],
+    *,
+    tenant_id: Optional[str] = None,
+) -> Sequence[dbm.Incident]:
+    """Batch fetch incidents for one tenant (avoids N+1 in list responses)."""
+    ids = [i for i in dict.fromkeys(incident_ids) if i]
+    if not ids:
+        return []
+    tenant_id = _require_tenant(tenant_id, "get_incidents_by_ids")
+    res = await session.execute(
+        select(dbm.Incident).where(dbm.Incident.id.in_(ids), dbm.Incident.tenant_id == tenant_id)
+    )
+    return res.scalars().all()
+
+
+async def update_incident(
+    session: AsyncSession,
+    incident_id: str,
+    *,
+    tenant_id: Optional[str] = None,
+    **fields: Any,
+) -> None:
+    """Update an incident row, scoped to the caller's tenant.
+
+    Without the tenant predicate this write is reachable with any incident id,
+    letting a caller in tenant A mutate tenant B's incident.
+    """
+    tenant_id = _require_tenant(tenant_id, "update_incident")
+    if "tenant_id" in fields and fields["tenant_id"] != tenant_id:
+        raise ValueError("update_incident cannot move an incident across tenants")
     await session.execute(
-        update(dbm.Incident).where(dbm.Incident.id == incident_id).values(**fields)
+        update(dbm.Incident)
+        .where(dbm.Incident.id == incident_id, dbm.Incident.tenant_id == tenant_id)
+        .values(**fields)
     )
 
 
 # ---------- Findings ----------
 
-async def add_finding(session: AsyncSession, **kwargs: Any) -> dbm.Finding:
-    f = dbm.Finding(**kwargs)
+async def add_finding(
+    session: AsyncSession,
+    *,
+    incident_id: str,
+    **kwargs: Any,
+) -> dbm.Finding:
+    """Insert a finding, inheriting ``tenant_id`` from its parent incident.
+
+    The tenant is read back from the ``incidents`` row rather than taken from a
+    caller argument or an ambient ContextVar. The orchestrator persists findings
+    from background job workers, where the request-scoped tenant ContextVar is
+    never set, so any of the other three sources would silently write NULL (or
+    the wrong tenant) exactly where isolation matters most.
+    """
+    res = await session.execute(
+        select(dbm.Incident.tenant_id).where(dbm.Incident.id == incident_id)
+    )
+    tenant_id = res.scalar_one_or_none()
+    if tenant_id is None:
+        raise ValueError(f"add_finding: unknown incident {incident_id!r}")
+
+    f = dbm.Finding(incident_id=incident_id, tenant_id=tenant_id, **kwargs)
     session.add(f)
     await session.flush()
     return f
 
 
-async def list_findings(session: AsyncSession, incident_id: str) -> Sequence[dbm.Finding]:
+async def list_findings(
+    session: AsyncSession,
+    incident_id: str,
+    *,
+    tenant_id: Optional[str] = None,
+) -> Sequence[dbm.Finding]:
+    """List findings for an incident, scoped to the caller's tenant."""
+    tenant_id = _require_tenant(tenant_id, "list_findings")
     res = await session.execute(
         select(dbm.Finding)
-        .where(dbm.Finding.incident_id == incident_id)
+        .join(dbm.Incident, dbm.Incident.id == dbm.Finding.incident_id)
+        .where(
+            dbm.Finding.incident_id == incident_id,
+            dbm.Incident.tenant_id == tenant_id,
+        )
         .order_by(dbm.Finding.created_at)
     )
     return res.scalars().all()
@@ -199,32 +286,91 @@ async def list_findings(session: AsyncSession, incident_id: str) -> Sequence[dbm
 
 # ---------- RootCause ----------
 
-async def save_root_cause(session: AsyncSession, **kwargs: Any) -> dbm.RootCause:
-    rc = dbm.RootCause(**kwargs)
-    session.add(rc)
+async def upsert_root_cause(
+    session: AsyncSession,
+    *,
+    tenant_id: Optional[str] = None,
+    **kwargs: Any,
+) -> dbm.RootCause:
+    """Insert or replace the root cause for an incident.
+
+    ``RootCause.incident_id`` is unique, and ``create_incident`` deliberately
+    merges a deduplicated request back into the existing incident row. A plain
+    ``save_root_cause`` therefore raised ``IntegrityError`` on every repeat run
+    against the same incident, surfacing as a 500. Upsert is the only correct
+    behaviour here.
+    """
+    incident_id = kwargs["incident_id"]
+    tenant_id = _require_tenant(tenant_id, "upsert_root_cause")
+    res = await session.execute(
+        select(dbm.RootCause).where(
+            dbm.RootCause.incident_id == incident_id,
+            dbm.RootCause.tenant_id == tenant_id,
+        )
+    )
+    rc = res.scalars().first()
+    if rc is None:
+        rc = dbm.RootCause(tenant_id=tenant_id, **kwargs)
+        session.add(rc)
+    else:
+        for key, value in kwargs.items():
+            setattr(rc, key, value)
     await session.flush()
     return rc
 
 
-async def get_root_cause(session: AsyncSession, incident_id: str) -> Optional[dbm.RootCause]:
+async def save_root_cause(
+    session: AsyncSession,
+    *,
+    tenant_id: Optional[str] = None,
+    **kwargs: Any,
+) -> dbm.RootCause:
+    return await upsert_root_cause(session, tenant_id=tenant_id, **kwargs)
+
+
+async def get_root_cause(
+    session: AsyncSession,
+    incident_id: str,
+    *,
+    tenant_id: Optional[str] = None,
+) -> Optional[dbm.RootCause]:
+    tenant_id = _require_tenant(tenant_id, "get_root_cause")
     res = await session.execute(
-        select(dbm.RootCause).where(dbm.RootCause.incident_id == incident_id)
+        select(dbm.RootCause).where(
+            dbm.RootCause.incident_id == incident_id,
+            dbm.RootCause.tenant_id == tenant_id,
+        )
     )
     return res.scalars().first()
 
 
 # ---------- Resolution ----------
 
-async def save_resolution(session: AsyncSession, **kwargs: Any) -> dbm.Resolution:
-    r = dbm.Resolution(**kwargs)
+async def save_resolution(
+    session: AsyncSession,
+    *,
+    tenant_id: Optional[str] = None,
+    **kwargs: Any,
+) -> dbm.Resolution:
+    tenant_id = _require_tenant(tenant_id, "save_resolution")
+    r = dbm.Resolution(tenant_id=tenant_id, **kwargs)
     session.add(r)
     await session.flush()
     return r
 
 
-async def get_resolution(session: AsyncSession, incident_id: str) -> Optional[dbm.Resolution]:
+async def get_resolution(
+    session: AsyncSession,
+    incident_id: str,
+    *,
+    tenant_id: Optional[str] = None,
+) -> Optional[dbm.Resolution]:
+    tenant_id = _require_tenant(tenant_id, "get_resolution")
     res = await session.execute(
-        select(dbm.Resolution).where(dbm.Resolution.incident_id == incident_id)
+        select(dbm.Resolution).where(
+            dbm.Resolution.incident_id == incident_id,
+            dbm.Resolution.tenant_id == tenant_id,
+        )
     )
     return res.scalars().first()
 
@@ -256,17 +402,28 @@ async def get_pattern_by_signature(
     return res.scalars().first()
 
 
-async def list_approved_patterns(session: AsyncSession) -> Sequence[dbm.Pattern]:
-    res = await session.execute(
-        select(dbm.Pattern).where(dbm.Pattern.approved.is_(True))
-    )
+async def list_approved_patterns(
+    session: AsyncSession, *, tenant_id: Optional[str] = None, limit: int = 500
+) -> Sequence[dbm.Pattern]:
+    """Approved patterns, optionally restricted to one tenant.
+
+    Bounded by ``limit``: this feeds plain ``GET`` endpoints, and an
+    unbounded read amplification on a cheap route is a DoS primitive.
+    """
+    stmt = select(dbm.Pattern).where(dbm.Pattern.approved.is_(True))
+    if tenant_id is not None:
+        stmt = stmt.where(dbm.Pattern.tenant_id == tenant_id)
+    res = await session.execute(stmt.limit(limit))
     return res.scalars().all()
 
 
-async def list_pending_patterns(session: AsyncSession) -> Sequence[dbm.Pattern]:
-    res = await session.execute(
-        select(dbm.Pattern).where(dbm.Pattern.approved.is_(False))
-    )
+async def list_pending_patterns(
+    session: AsyncSession, *, tenant_id: Optional[str] = None, limit: int = 500
+) -> Sequence[dbm.Pattern]:
+    stmt = select(dbm.Pattern).where(dbm.Pattern.approved.is_(False))
+    if tenant_id is not None:
+        stmt = stmt.where(dbm.Pattern.tenant_id == tenant_id)
+    res = await session.execute(stmt.limit(limit))
     return res.scalars().all()
 
 
@@ -291,9 +448,14 @@ async def add_memory(session: AsyncSession, **kwargs: Any) -> dbm.IncidentMemory
     return m
 
 
-async def list_memory(session: AsyncSession, limit: int = 1000) -> Sequence[dbm.IncidentMemory]:
+async def list_memory(
+    session: AsyncSession, limit: int = 1000, *, tenant_id: Optional[str] = None
+) -> Sequence[dbm.IncidentMemory]:
+    stmt = select(dbm.IncidentMemory)
+    if tenant_id is not None:
+        stmt = stmt.where(dbm.IncidentMemory.tenant_id == tenant_id)
     res = await session.execute(
-        select(dbm.IncidentMemory).order_by(dbm.IncidentMemory.created_at.desc()).limit(limit)
+        stmt.order_by(dbm.IncidentMemory.created_at.desc()).limit(limit)
     )
     return res.scalars().all()
 
@@ -301,20 +463,22 @@ async def list_memory(session: AsyncSession, limit: int = 1000) -> Sequence[dbm.
 # ---------- Agent Reliability ----------
 
 async def get_agent_reliability(
-    session: AsyncSession, agent_name: str
+    session: AsyncSession, agent_name: str, *, tenant_id: Optional[str] = None
 ) -> Optional[dbm.AgentReliability]:
-    res = await session.execute(
-        select(dbm.AgentReliability).where(dbm.AgentReliability.agent_name == agent_name)
-    )
+    stmt = select(dbm.AgentReliability).where(dbm.AgentReliability.agent_name == agent_name)
+    if tenant_id is not None:
+        stmt = stmt.where(dbm.AgentReliability.tenant_id == tenant_id)
+    res = await session.execute(stmt)
     return res.scalars().first()
 
 
 async def upsert_agent_reliability(
     session: AsyncSession, agent_name: str, **fields: Any
 ) -> dbm.AgentReliability:
-    ar = await get_agent_reliability(session, agent_name)
+    tenant_id = fields.get("tenant_id")
+    ar = await get_agent_reliability(session, agent_name, tenant_id=tenant_id)
     if ar is None:
-        ar = dbm.AgentReliability(id=agent_name, agent_name=agent_name, **fields)
+        ar = dbm.AgentReliability(agent_name=agent_name, **fields)
         session.add(ar)
     else:
         for k, v in fields.items():
@@ -323,23 +487,29 @@ async def upsert_agent_reliability(
     return ar
 
 
-async def list_agent_reliabilities(session: AsyncSession) -> Sequence[dbm.AgentReliability]:
-    res = await session.execute(select(dbm.AgentReliability))
+async def list_agent_reliabilities(
+    session: AsyncSession, *, tenant_id: Optional[str] = None
+) -> Sequence[dbm.AgentReliability]:
+    stmt = select(dbm.AgentReliability)
+    if tenant_id is not None:
+        stmt = stmt.where(dbm.AgentReliability.tenant_id == tenant_id)
+    res = await session.execute(stmt)
     return res.scalars().all()
 
 
 # ---------- Predictions ----------
 
 async def save_prediction(session: AsyncSession, **kwargs: Any) -> dbm.Prediction:
-    # Check for existing prediction for the same service and predicted_failure_type
-    existing_prediction = await session.execute(
-        select(dbm.Prediction)
-        .where(
+    # Check for existing prediction for the same tenant, service and failure type
+    tenant_id = _require_tenant(kwargs.get("tenant_id"), "save_prediction")
+    existing_res = await session.execute(
+        select(dbm.Prediction).where(
+            dbm.Prediction.tenant_id == tenant_id,
             dbm.Prediction.service == kwargs["service"],
             dbm.Prediction.predicted_failure_type == kwargs["predicted_failure_type"],
         )
     )
-    existing_prediction = existing_prediction.scalars().first()
+    existing_prediction = existing_res.scalars().first()
 
     if existing_prediction:
         # Update existing prediction
@@ -347,17 +517,22 @@ async def save_prediction(session: AsyncSession, **kwargs: Any) -> dbm.Predictio
             setattr(existing_prediction, key, value)
         await session.flush()
         return existing_prediction
-    else:
-        # Create new prediction
-        p = dbm.Prediction(**kwargs)
-        session.add(p)
-        await session.flush()
-        return p
+    # Create new prediction
+    p = dbm.Prediction(**kwargs)
+    session.add(p)
+    await session.flush()
+    return p
 
 
-async def list_predictions(session: AsyncSession, limit: int = 50) -> Sequence[dbm.Prediction]:
+async def list_predictions(
+    session: AsyncSession, limit: int = 50, *, tenant_id: Optional[str] = None
+) -> Sequence[dbm.Prediction]:
+    tenant_id = _require_tenant(tenant_id, "list_predictions")
     res = await session.execute(
-        select(dbm.Prediction).order_by(dbm.Prediction.updated_at.desc()).limit(limit)
+        select(dbm.Prediction)
+        .where(dbm.Prediction.tenant_id == tenant_id)
+        .order_by(dbm.Prediction.updated_at.desc())
+        .limit(limit)
     )
     return res.scalars().all()
 
@@ -382,6 +557,10 @@ async def create_job(
     attempts_max: int = 3,
 ) -> dbm.InvestigationJob:
     """Insert a new queued job.  Raises IntegrityError on duplicate key."""
+    # Every other tenant-scoped read/write fails closed on a missing tenant;
+    # this one silently accepted NULL, which would enqueue work that no tenant
+    # could ever see or cancel.
+    tenant_id = _require_tenant(tenant_id, "create_job")
     job = dbm.InvestigationJob(
         tenant_id=tenant_id,
         idempotency_key=idempotency_key,
@@ -401,26 +580,32 @@ async def get_job(
     *,
     tenant_id: Optional[str] = None,
 ) -> Optional[dbm.InvestigationJob]:
+    tenant_id = _require_tenant(tenant_id, "get_job")
     res = await session.execute(
         select(dbm.InvestigationJob).where(dbm.InvestigationJob.id == job_id)
     )
     job = res.scalars().first()
-    if job is None or (tenant_id and job.tenant_id != tenant_id):
+    if job is None or job.tenant_id != tenant_id:
         return None
     return job
 
 
 async def get_job_by_idempotency_key(
     session: AsyncSession,
-    key: str,
+    key: Optional[str],
     *,
     tenant_id: Optional[str] = None,
 ) -> Optional[dbm.InvestigationJob]:
+    # A ``None`` key must never reach the query: it would render as ``IS NULL``
+    # and match an arbitrary keyless job belonging to another tenant.
+    if not key:
+        return None
+    tenant_id = _require_tenant(tenant_id, "get_job_by_idempotency_key")
     res = await session.execute(
         select(dbm.InvestigationJob).where(dbm.InvestigationJob.idempotency_key == key)
     )
     job = res.scalars().first()
-    if job is None or (tenant_id and job.tenant_id != tenant_id):
+    if job is None or job.tenant_id != tenant_id:
         return None
     return job
 
@@ -431,13 +616,45 @@ async def list_jobs(
     *,
     tenant_id: Optional[str] = None,
 ) -> Sequence[dbm.InvestigationJob]:
-    stmt = select(dbm.InvestigationJob)
-    if tenant_id:
-        stmt = stmt.where(dbm.InvestigationJob.tenant_id == tenant_id)
+    tenant_id = _require_tenant(tenant_id, "list_jobs")
+    stmt = select(dbm.InvestigationJob).where(dbm.InvestigationJob.tenant_id == tenant_id)
     res = await session.execute(
         stmt.order_by(dbm.InvestigationJob.created_at.desc()).limit(limit)
     )
     return res.scalars().all()
+
+
+async def reclaim_stale_jobs(
+    session: AsyncSession, *, lease_seconds: float
+) -> int:
+    """Return jobs whose worker died mid-flight back to the queue.
+
+    ``claim_next_job`` sets ``locked_at`` but nothing ever read it, so a worker
+    killed between claim and completion (OOM, deploy rollout, unhandled
+    ``BaseException``) left a job ``running`` forever: never retried, never
+    dead-lettered, and invisible to the caller. Anything older than the lease
+    is assumed abandoned.
+    """
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(seconds=max(1.0, float(lease_seconds)))
+    res = await session.execute(
+        update(dbm.InvestigationJob)
+        .where(
+            dbm.InvestigationJob.status == "running",
+            or_(
+                dbm.InvestigationJob.locked_at.is_(None),
+                dbm.InvestigationJob.locked_at <= cutoff,
+            ),
+        )
+        .values(
+            status="queued",
+            locked_at=None,
+            next_attempt_at=now,
+            error="Worker lease expired; job requeued",
+        )
+    )
+    await session.flush()
+    return int(res.rowcount or 0)
 
 
 async def claim_next_job(
@@ -510,13 +727,21 @@ async def cancel_job(
     job_id: str,
     *,
     tenant_id: Optional[str] = None,
-) -> bool:
-    """Cancel a queued/running job.  Returns False if already terminal."""
+) -> tuple[bool, Optional[dbm.InvestigationJob]]:
+    """Cancel a queued/running job.
+
+    Returns ``(cancelled, job)``. ``cancelled`` is True only when this call
+    performed the transition, so the caller can tell a real cancel from a no-op
+    instead of reporting success for an already-finished job. ``job`` is
+    returned in every case where the row exists, so the caller can report the
+    true current status.
+    """
     job = await get_job(session, job_id, tenant_id=tenant_id)
     if job is None:
-        return False
+        return False, None
     if job.status in {"queued", "running"}:
         job.status = "cancelled"
+        job.locked_at = None
         await session.flush()
-        return True
-    return False
+        return True, job
+    return False, job

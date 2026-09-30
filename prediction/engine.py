@@ -87,6 +87,7 @@ async def predict(
     recent_anomalies: Optional[Dict[str, List[float]]] = None,
     topology_dependents: Optional[Dict[str, int]] = None,
     persist: bool = True,
+    tenant_id: Optional[str] = None,
 ) -> List[Prediction]:
     """
     Generate predictions for every service with historical incidents.
@@ -104,6 +105,10 @@ async def predict(
         scale impact.
     persist
         If True, predictions are written to the ``predictions`` table.
+    tenant_id
+        Owning tenant.  Required: the historical corpus is loaded with
+        ``list_incidents``, which now fails closed, so an unscoped call can no
+        longer train on -- or predict from -- another tenant's incidents.
     """
     recent_anomalies = recent_anomalies or {}
     topology_dependents = topology_dependents or {}
@@ -113,7 +118,7 @@ async def predict(
         from database.session import AsyncSessionLocal
 
         async with AsyncSessionLocal() as session:
-            incidents = await list_incidents(session, limit=5000)
+            incidents = await list_incidents(session, limit=5000, tenant_id=tenant_id)
     except Exception as exc:
         logger.warning("prediction_load_incidents_failed error=%r", exc)
         incidents = []
@@ -229,11 +234,17 @@ async def predict(
             from database import models as dbm
 
             async with AsyncSessionLocal() as session:
-                # Clear existing predictions before saving new ones to prevent duplicates
-                await session.execute(delete(dbm.Prediction))
+                # Scoped to this tenant only. The previous
+                # ``delete(dbm.Prediction)`` had no predicate at all, so one
+                # tenant running predictions erased every other tenant's
+                # stored predictions.
+                await session.execute(
+                    delete(dbm.Prediction).where(dbm.Prediction.tenant_id == tenant_id)
+                )
                 for p in predictions[:50]:
                     await save_prediction(
                         session,
+                        tenant_id=tenant_id,
                         service=p.service,
                         predicted_failure_type=p.predicted_failure_type,
                         probability=p.probability,

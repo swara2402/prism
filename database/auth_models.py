@@ -4,7 +4,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, JSON, String, func
+from sqlalchemy import Boolean, DateTime, ForeignKey, JSON, String, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from database.session import Base
@@ -26,9 +26,19 @@ class Tenant(Base):
 
 
 class User(Base):
+    """A workspace member.
+
+    Email is unique *per tenant*, not globally. A global unique constraint let
+    any workspace admin permanently claim an address, denying every other
+    workspace the ability to onboard that person, and made a 409 response leak
+    that the address is registered somewhere.
+    """
+
     __tablename__ = "users"
+    __table_args__ = (UniqueConstraint("tenant_id", "email", name="_tenant_email_uc"),)
+
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_id)
-    email: Mapped[str] = mapped_column(String(320), unique=True, index=True, nullable=False)
+    email: Mapped[str] = mapped_column(String(320), index=True, nullable=False)
     password_hash: Mapped[str] = mapped_column(String(512), nullable=False)
     tenant_id: Mapped[str] = mapped_column(String(32), ForeignKey("tenants.id", ondelete="CASCADE"), index=True, nullable=False)
     role: Mapped[str] = mapped_column(String(32), default="viewer", nullable=False)

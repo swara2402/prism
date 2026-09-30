@@ -33,13 +33,14 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
+from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
 from fastapi.responses import StreamingResponse
 import json
 
-from api.deps import require_api_key
+from api.deps import require_api_key, require_tenant
 from causal_graph.engine import CausalGraphBuilder
 from confidence.engine import propagate
 from consensus.engine import reach_consensus
@@ -53,7 +54,7 @@ from database.repositories import (
     list_findings,
     list_incidents,
     save_resolution,
-    save_root_cause,
+    upsert_root_cause,
     update_incident,
 )
 from explainability.engine import build_explanation
@@ -84,21 +85,21 @@ def apply_graph_traversal_fallback(
     candidates: List[Dict[str, Any]],
     enable_fallback: bool = False,
 ) -> Any:
-    """Explicitly isolated graph traversal fallback helper.
+    """Fall back to the highest-confidence graph candidate when consensus is
+    undetermined.
 
-    When enable_fallback is True and consensus root cause is undetermined,
-    falls back to the highest confidence graph traversal candidate.
+    Only reachable when ``enable_fallback`` is true. Both call sites previously
+    passed ``False``, making the body -- and the ``None`` concatenation in it --
+    permanently dead code.
     """
     if enable_fallback and getattr(consensus, "root_cause", None) == "undetermined" and candidates:
-        logger.warning(
-            "graph_traversal_fallback_applied: candidate=%s",
-            candidates[0].get("label"),
-        )
+        label = candidates[0].get("label")
+        logger.warning("graph_traversal_fallback_applied", extra={"label": label})
         return consensus.__class__(
-            root_cause=candidates[0].get("label") or "undetermined",
-            confidence=candidates[0].get("confidence", 0.3),
+            root_cause=label or "undetermined",
+            confidence=float(candidates[0].get("confidence") or 0.3),
             alternatives=consensus.alternatives,
-            explanation=consensus.explanation + " (fallback to graph traversal)",
+            explanation=f"{consensus.explanation or ''} (fallback to graph traversal)",
             voter_breakdown=consensus.voter_breakdown,
         )
     return consensus
@@ -115,93 +116,257 @@ _rate_limiter = build_rate_limiter(
     settings.investigation_rate_limit, settings.redis_url
 )
 
-# Reproducibility metadata for this PRISM build.
-_PRISM_VERSION = "1.1.0"
+# Reproducibility metadata for this WayPoint build.
+_PRISM_VERSION = "2.0.0"
+
+# Every finding type that means "this agent did not produce a usable signal".
+# Previously only ``error`` was treated as a failure, so a timed-out agent
+# (agents.base.BaseAgent sets ``timeout``) or a self-degraded one
+# (``historical_analyzer`` sets ``degraded``) was reported ``ok`` and the run
+# was advertised as ``completed``.
+_DEGRADED_FINDING_TYPES = frozenset({"error", "timeout", "degraded", "empty"})
+
+
+def _finding_field(finding: Any, field: str, default: Any = None) -> Any:
+    """Read one field from a Finding dataclass or an equivalent dict.
+
+    The duplicated ``isinstance(f, dict) else getattr(...)`` dance previously
+    appeared five times with three different default values.
+    """
+    if isinstance(finding, dict):
+        value = finding.get(field, default)
+    else:
+        value = getattr(finding, field, default)
+    return default if value is None else value
+
+
+def _redact_evidence(incident_in: IncidentCreate):
+    """Scrub every user-supplied field. Runs in a worker thread.
+
+    ``scrub`` is regex-bound CPU work and was previously called inline inside
+    ``async def``; the email pattern backtracks super-linearly, so a single
+    legal request could stall the event loop for seconds.
+    """
+    from utils.redaction import scrub, scrub_collection, scrub_iterable
+
+    return (
+        scrub_iterable(incident_in.raw_logs),
+        scrub_collection(incident_in.metrics),
+        scrub_collection(incident_in.traces),
+        scrub_collection(incident_in.topology),
+        scrub_collection(incident_in.context),
+        scrub(incident_in.description or "") or None,
+    )
+
+
+def _build_graph_stage(
+    findings: List[Any],
+    affected_services: List[str],
+    safe_logs: List[str],
+    safe_metrics: Dict[str, Any],
+    safe_traces: List[Dict[str, Any]],
+):
+    """Causal graph + confidence propagation + candidate ranking.
+
+    Pure CPU work, executed via ``asyncio.to_thread`` so it cannot block the
+    event loop shared by every other request in the process.
+    """
+    builder = CausalGraphBuilder()
+    causal_graph = builder.build_from_findings(
+        findings=findings,
+        affected_services=affected_services,
+        logs=safe_logs,
+        metrics=safe_metrics,
+        traces=safe_traces,
+    )
+    propagation = propagate(causal_graph, iterations=settings.propagation_iterations)
+    candidates = causal_graph.find_root_causes(top_k=5)
+    return causal_graph, propagation, candidates
+
+
+async def _persist_incident(
+    session: Any,
+    incident_in: IncidentCreate,
+    safe_description: Optional[str],
+    safe_logs: List[str],
+    safe_metrics: Dict[str, Any],
+    safe_traces: List[Dict[str, Any]],
+    safe_topology: Dict[str, Any],
+    safe_context: Dict[str, Any],
+    tenant_id: str,
+    idempotency_key: Optional[str],
+) -> str:
+    """Create (or merge into) the incident row and return its id."""
+    inc = await create_incident(
+        session,
+        title=incident_in.title,
+        description=safe_description or None,
+        severity=incident_in.severity,
+        status="investigating",
+        incident_type=incident_in.incident_type,
+        affected_services=incident_in.affected_services,
+        raw_logs=safe_logs,
+        metrics=safe_metrics,
+        traces=safe_traces,
+        topology=safe_topology,
+        context=safe_context,
+        started_at=incident_in.started_at,
+        tenant_id=tenant_id,
+    )
+    if idempotency_key and getattr(inc, "idempotency_key", None) != idempotency_key:
+        await update_incident(
+            session, inc.id, tenant_id=tenant_id, idempotency_key=idempotency_key
+        )
+    return inc.id
 
 
 def _build_agent_statuses(findings: List[Any]) -> List[Dict[str, Any]]:
-    """Reduce findings into per-agent execution status (P1#21 failure semantics).
+    """Reduce findings into per-agent execution status.
 
-    ``finding_type == "error"`` (set by :class:`BaseAgent.run`) marks a
-    degraded agent; anything else is a successful invocation.
+    ``error``, ``timeout``, ``degraded`` and ``empty`` all mark an agent that
+    did not deliver a usable signal; anything else is a successful invocation.
     """
     statuses: List[Dict[str, Any]] = []
     for f in findings:
-        name = getattr(f, "agent_name", None) or (f.get("agent_name") if isinstance(f, dict) else None) or "unknown"
-        ftype = getattr(f, "finding_type", None) or (f.get("finding_type") if isinstance(f, dict) else None) or "analysis"
-        latency = getattr(f, "latency_s", 0.0) or (f.get("latency_s", 0.0) if isinstance(f, dict) else 0.0)
+        name = _finding_field(f, "agent_name", "unknown")
+        ftype = _finding_field(f, "finding_type", "analysis")
+        latency = _finding_field(f, "latency_s", 0.0)
         statuses.append({
             "agent_name": name,
-            "status": "failed" if ftype == "error" else "ok",
+            "status": "failed" if ftype in _DEGRADED_FINDING_TYPES else "ok",
             "execution_ms": round(float(latency or 0.0) * 1000, 2),
             "finding_type": ftype,
         })
     return statuses
 
 
-def _runtime_metadata() -> Dict[str, Any]:
-    """Capture the exact runtime / model / config versions (P2#22)."""
-    return {
+def _runtime_metadata(role: str = "engineer") -> Dict[str, Any]:
+    """Reproducibility metadata.
+
+    Internal infrastructure topology (LLM host, database host/port) is
+    administrative detail. It is withheld from non-admin callers instead of
+    being handed to every authenticated role as free reconnaissance.
+    """
+    runtime: Dict[str, Any] = {
         "prism_version": _PRISM_VERSION,
         "llm_model": settings.ollama_model,
-        "llm_host": settings.ollama_host,
         "embedding_model": settings.sentence_transformer_model,
         "learning_mode": settings.learning_mode,
         "learning_require_confirmation": settings.learning_require_confirmation,
         "mdv_threshold": settings.MDV_THRESHOLD,
         "max_investigation_steps": settings.MAX_INVESTIGATION_STEPS,
         "consensus_confidence_threshold": settings.consensus_confidence_threshold,
-        "database_url_masked": _mask_database_url(settings.database_url),
     }
+    from auth.security import ROLE_ORDER
 
-
-def _normalize_tenant(value: Optional[str]) -> Optional[str]:
-    return (value or "").strip()[:64] or None
-
-
-def _enforce_tenant(value: Optional[str]) -> Optional[str]:
-    """Normalize and (optionally) require the X-Tenant-Id header.
-
-    When ``settings.require_tenant_header`` is enabled, requests that omit the
-    tenant header are rejected, giving auth-layer tenant isolation instead of
-    soft scoping.  Disabled by default for backward compatibility.
-    """
-    tenant = _normalize_tenant(value)
-    if settings.require_tenant_header and tenant is None:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="X-Tenant-Id header is required",
-        )
-    return tenant
+    if ROLE_ORDER.get(role, 0) >= ROLE_ORDER.get("admin", 999):
+        runtime["llm_host"] = settings.ollama_host
+        runtime["database_url_masked"] = _mask_database_url(settings.database_url)
+    return runtime
 
 
 def _mask_database_url(url: str) -> str:
-    """Mask credentials in a database URL for reproducibility logs."""
-    try:
-        scheme, _, rest = url.partition("://")
-        if "@" in rest:
-            auth, _, host = rest.rpartition("@")
-            return f"{scheme}://***@{host}"
-        return f"{scheme}://{rest}"
-    except Exception:
+    """Mask credentials in a database URL for reproducibility logs.
+
+    Uses ``urlsplit`` rather than manual ``partition``: partitioning a
+    scheme-less URL put the whole string in the "scheme" half and returned the
+    password in cleartext, which is precisely what this function exists to
+    prevent.
+    """
+    if not url:
         return "[redacted]"
+    try:
+        parsed = urlsplit(url)
+    except ValueError:
+        return "[redacted]"
+    if not parsed.scheme or not parsed.netloc:
+        # Unparseable input must never be echoed verbatim.
+        return "[redacted]"
+    if parsed.password:
+        host = parsed.hostname or ""
+        if parsed.port:
+            host = f"{host}:{parsed.port}"
+        return f"{parsed.scheme}://***@{host}{parsed.path}"
+    return f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
 
 
-def _rate_limit_key(
-    request: Request,
-    tenant: Optional[str],
-    api_key: str,
-) -> str:
-    """Identity used for rate limiting: tenant > API-key hash > client IP."""
+def _rate_limit_key(request: Request, tenant: str, api_key: str) -> str:
+    """Identity used for rate limiting: tenant > API-key hash > client IP.
+
+    Single definition: the inline copy used by ``POST /investigate`` had
+    already drifted from this helper.
+    """
     if tenant:
         return f"tenant:{tenant}"
-    digest = hashlib.sha256(api_key.encode()).hexdigest()[:16]
-    if api_key and api_key != "anonymous":
-        return f"apikey:{digest}"
+    if api_key:
+        return f"apikey:{hashlib.sha256(api_key.encode()).hexdigest()[:16]}"
     return f"ip:{request.client.host if request.client else 'unknown'}"
 
 
-async def _job_to_out(job: Any) -> JobOut:
+async def _acquire_investigation_slot(request: Request) -> None:
+    """Take a concurrency slot, or raise 429.
+
+    Called from the route body -- before any response has started -- so an
+    over-capacity request is rejected with a real status code. Acquiring inside
+    a streaming generator instead means the 200 is already committed.
+    """
+    request_id = getattr(request.state, "request_id", None) or "unknown"
+    try:
+        await asyncio.wait_for(_investigation_semaphore.acquire(), timeout=_ACQUIRE_TIMEOUT)
+    except asyncio.TimeoutError:
+        logger.warning(
+            "investigation_capacity_exceeded",
+            extra={
+                "request_id": request_id,
+                "max_concurrent": settings.max_concurrent_investigations,
+            },
+        )
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=(
+                "Too many concurrent investigations "
+                f"(limit={settings.max_concurrent_investigations}). Try again shortly."
+            ),
+        )
+
+
+async def _jobs_to_out(jobs: Sequence[Any], *, tenant_id: str) -> List[JobOut]:
+    """Build JobOut for many jobs with a single batched incident fetch.
+
+    The previous per-job version opened one DB session per job inside a list
+    comprehension -- up to ``max_pagination_limit`` sequential round trips on a
+    cheap GET, and the embedded incident was fetched unscoped.
+    """
+    from database.repositories import get_incidents_by_ids
+    from database.session import AsyncSessionLocal
+
+    ids = [j.result_incident_id for j in jobs if j.result_incident_id]
+    incidents: Dict[str, Any] = {}
+    if ids:
+        async with AsyncSessionLocal() as session:
+            for inc in await get_incidents_by_ids(session, ids, tenant_id=tenant_id):
+                incidents[inc.id] = inc
+
+    def _build(job: Any) -> JobOut:
+        inc = incidents.get(job.result_incident_id) if job.result_incident_id else None
+        return JobOut(
+            id=job.id,
+            tenant_id=job.tenant_id,
+            status=job.status,
+            progress=job.progress,
+            attempts=job.attempts,
+            attempts_max=job.attempts_max,
+            result_incident_id=job.result_incident_id,
+            error=job.error,
+            created_at=job.created_at,
+            updated_at=job.updated_at,
+            incident=IncidentOut.model_validate(inc) if inc is not None else None,
+        )
+
+    return [_build(j) for j in jobs]
+
+
+async def _job_to_out(job: Any, *, tenant_id: str) -> JobOut:
     """Build a :class:`JobOut` from a job row, embedding the incident when done."""
     from database.repositories import get_incident
     from database.session import AsyncSessionLocal
@@ -209,7 +374,7 @@ async def _job_to_out(job: Any) -> JobOut:
     incident_out = None
     if job.result_incident_id:
         async with AsyncSessionLocal() as session:
-            inc = await get_incident(session, job.result_incident_id)
+            inc = await get_incident(session, job.result_incident_id, tenant_id=tenant_id)
             incident_out = IncidentOut.model_validate(inc) if inc is not None else None
     return JobOut(
         id=job.id,
@@ -226,6 +391,7 @@ async def _job_to_out(job: Any) -> JobOut:
     )
 
 
+
 # ---------------------------------------------------------------
 # POST /incidents/investigate
 # ---------------------------------------------------------------
@@ -235,36 +401,23 @@ async def investigate(
     incident_in: IncidentCreate,
     request: Request,
     _api_key: str = Depends(require_api_key),
+    tenant: str = Depends(require_tenant),
     x_idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key"),
-    x_tenant_id: Optional[str] = Header(default=None, alias="X-Tenant-Id"),
 ) -> InvestigationResult:
     """
     Run the full agentic investigation pipeline for a new incident.
-    Requires X-API-Key when API_KEY is configured.
 
-    Sending the same ``Idempotency-Key`` header for the same incident
-    returns the previously persisted investigation instead of running
-    duplicate agent work.  The optional ``X-Tenant-Id`` header scopes the
-    incident to a tenant.
+    Sending the same ``Idempotency-Key`` header for the same incident returns
+    the previously persisted investigation instead of re-running agent work.
+    The tenant is taken from the authenticated credential; there is no
+    client-supplied tenant parameter.
     """
     request_id = getattr(request.state, "request_id", None) or "unknown"
-    acquired = False
+    role = getattr(getattr(request.state, "principal", None), "role", "engineer")
 
-    # Idempotency: a previously recorded investigation under this key is
-    # returned directly.  Enforced both by the in-process lock AND the
-    # incident dedup in create_incident (key stored on the incident row).
     idem_key = (x_idempotency_key or "").strip()[:128] or None
-    tenant = _enforce_tenant(x_tenant_id)
 
-    if tenant:
-        rate_key = f"tenant:{tenant}"
-    elif _api_key:
-        digest = hashlib.sha256(_api_key.encode()).hexdigest()[:16]
-        rate_key = f"apikey:{digest}"
-    else:
-        rate_key = f"ip:{request.client.host if request.client else 'unknown'}"
-
-    allowed, retry_after = await _rate_limiter.check(rate_key)
+    allowed, retry_after = await _rate_limiter.check(_rate_limit_key(request, tenant, _api_key))
     if not allowed:
         logger.warning(
             "investigation_rate_limited",
@@ -279,38 +432,17 @@ async def investigate(
             headers={"Retry-After": str(max(1, int(retry_after + 0.999)))},
         )
 
-    try:
-        await asyncio.wait_for(
-            _investigation_semaphore.acquire(),
-            timeout=_ACQUIRE_TIMEOUT,
-        )
-        acquired = True
-    except asyncio.TimeoutError:
-        logger.warning(
-            "investigation_capacity_exceeded",
-            extra={
-                "request_id": request_id,
-                "max_concurrent": settings.max_concurrent_investigations,
-            },
-        )
-        raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail=(
-                f"Too many concurrent investigations "
-                f"(limit={settings.max_concurrent_investigations}). Try again shortly."
-            ),
-        )
-
+    await _acquire_investigation_slot(request)
     try:
         return await _run_investigation(
             incident_in,
             request_id=request_id,
             idempotency_key=idem_key,
             tenant_id=tenant,
+            principal_role=role,
         )
     finally:
-        if acquired:
-            _investigation_semaphore.release()
+        _investigation_semaphore.release()
 
 
 async def _run_investigation(
@@ -318,70 +450,57 @@ async def _run_investigation(
     request_id: str = "unknown",
     idempotency_key: Optional[str] = None,
     tenant_id: Optional[str] = None,
+    principal_role: str = "engineer",
 ) -> InvestigationResult:
     """
     Internal investigation pipeline (runs under the concurrency semaphore).
-    """
-    # 1. Redact sensitive data from evidence BEFORE persistence or LLM exposure.
-    from utils.redaction import scrub, scrub_collection, scrub_iterable
-    safe_logs = scrub_iterable(incident_in.raw_logs)
-    safe_metrics = scrub_collection(incident_in.metrics)
-    safe_traces = scrub_collection(incident_in.traces)
-    safe_topology = scrub_collection(incident_in.topology)
-    safe_context = scrub_collection(incident_in.context)
-    safe_description = scrub(incident_in.description or "") or None
 
-    # 1. Persist the incident - use repository's create_incident which has built-in deduplication
+    ``tenant_id`` is required: every read and write below is tenant-scoped.
+    """
     from database.session import AsyncSessionLocal
-    from database.repositories import get_incident_by_idempotency_key
+    from utils.redaction import scrub, scrub_collection, scrub_iterable
+
+    if not tenant_id:
+        raise HTTPException(403, "No tenant is bound to this credential")
+
+    # 1. Redact sensitive data from evidence BEFORE persistence or LLM exposure.
+    #    Scrubbing is regex-bound CPU work, so it runs off the event loop; the
+    #    email pattern in particular backtracks super-linearly on long inputs.
+    safe_logs, safe_metrics, safe_traces, safe_topology, safe_context, safe_description = (
+        await asyncio.to_thread(
+            _redact_evidence,
+            incident_in,
+        )
+    )
 
     try:
         async with AsyncSessionLocal() as session:
             # Idempotency: if an investigation was already run under this key, do
             # not run the pipeline again — return the existing result.
+            existing = None
             if idempotency_key:
                 existing = await get_incident_by_idempotency_key(
                     session, idempotency_key, tenant_id=tenant_id
                 )
-                if existing is not None:
-                    logger.info(
-                        "investigation_idempotent_hit",
-                        extra={
-                            "request_id": request_id,
-                            "incident_id": existing.id,
-                            "idempotency_key": idempotency_key,
-                        },
-                    )
-                    await session.close()
-                    return await _result_for_existing_incident(existing.id, reused=True)
-
-            # create_incident automatically checks for similar existing incidents and updates them
-            inc = await create_incident(
-                session,
-                title=incident_in.title,
-                description=safe_description or None,
-                severity=incident_in.severity,
-                status="investigating",
-                incident_type=incident_in.incident_type,
-                affected_services=incident_in.affected_services,
-                raw_logs=safe_logs,
-                metrics=safe_metrics,
-                traces=safe_traces,
-                topology=safe_topology,
-                context=safe_context,
-                started_at=incident_in.started_at,
-                tenant_id=tenant_id,
-            )
-            # Record the idempotency key for future dedup lookups.
-            if idempotency_key and getattr(inc, "idempotency_key", None) != idempotency_key:
-                from database.repositories import update_incident as _upd
-                await _upd(session, inc.id, idempotency_key=idempotency_key)
+            if existing is not None:
+                logger.info(
+                    "investigation_idempotent_hit",
+                    extra={
+                        "request_id": request_id,
+                        "incident_id": existing.id,
+                        "idempotency_key": idempotency_key,
+                    },
+                )
+                incident_id = existing.id
+            else:
+                incident_id = await _persist_incident(
+                    session, incident_in, safe_description, safe_logs, safe_metrics,
+                    safe_traces, safe_topology, safe_context, tenant_id, idempotency_key,
+                )
             await session.commit()
-            incident_id = inc.id
     except IntegrityError:
         # A concurrent request claimed this idempotency key onto another
-        # incident row (or updated an existing one) — replay its result
-        # instead of failing with a 500.
+        # incident row — replay its result instead of failing with a 500.
         logger.info(
             "investigation_idempotency_race_replayed",
             extra={"request_id": request_id, "idempotency_key": idempotency_key},
@@ -392,11 +511,22 @@ async def _run_investigation(
                     _sess, idempotency_key, tenant_id=tenant_id
                 )
                 if existing is not None:
-                    return await _result_for_existing_incident(existing.id, reused=True)
+                    return await _result_for_existing_incident(
+                        existing.id, tenant_id=tenant_id, reused=True
+                    )
         raise
+
+    if existing is not None:
+        return await _result_for_existing_incident(
+            incident_id, tenant_id=tenant_id, reused=True
+        )
 
     # 2. Build investigation context (already redacted)
     context: Dict[str, Any] = {
+        # Explicit, not ambient. The ContextVar fallback is never populated in
+        # the background worker, so relying on it silently disabled the
+        # historical agent for every async job.
+        "tenant_id": tenant_id,
         "logs": safe_logs,
         "metrics": safe_metrics,
         "traces": safe_traces,
@@ -417,27 +547,21 @@ async def _run_investigation(
     findings = tree_result.findings
     agents_used = tree_result.agents_used
 
-    # 4. Build causal graph
-    builder = CausalGraphBuilder()
-    causal_graph = builder.build_from_findings(
-        findings=findings,
-        affected_services=incident_in.affected_services,
-        logs=safe_logs,
-        metrics=safe_metrics,
-        traces=safe_traces,
+    # 4-6. Causal graph, confidence propagation and root-cause candidates.
+    #      Pure CPU work -- off the event loop so it cannot stall the server.
+    causal_graph, propagation, candidates = await asyncio.to_thread(
+        _build_graph_stage, findings, incident_in.affected_services, safe_logs,
+        safe_metrics, safe_traces,
     )
 
-    # 5. Confidence propagation
-    propagation = propagate(causal_graph, iterations=5)
-
-    # 6. Find root cause candidates via graph traversal
-    candidates = causal_graph.find_root_causes(top_k=5)
     root_node_id = candidates[0]["node_id"] if candidates else None
-    # Map candidate label to confidence for consensus
+    # Keyed by the graph node id, not its display label. The consensus engine
+    # looks this up with a natural-language hypothesis, so a label key made the
+    # entire graph evidence channel unreachable.
     graph_candidates = {
-        candidate["label"]: candidate.get("confidence", 0.0)
+        str(candidate.get("node_id")): float(candidate.get("confidence") or 0.0)
         for candidate in candidates
-        if candidate.get("label")
+        if candidate.get("node_id")
     }
 
     # 7. Consensus engine
@@ -447,11 +571,14 @@ async def _run_investigation(
         graph_candidates=graph_candidates,
     )
 
-    # Graph traversal fallback is explicitly isolated and disabled by default
-    consensus = apply_graph_traversal_fallback(consensus, candidates, enable_fallback=False)
+    # Graph traversal fallback, driven by configuration rather than hardcoded
+    # off at both call sites.
+    consensus = apply_graph_traversal_fallback(
+        consensus, candidates, enable_fallback=settings.graph_traversal_fallback
+    )
 
-
-    # 8. Persist root cause
+    # 8. Persist root cause (upsert: a deduplicated repeat run must not raise
+    #    IntegrityError against the existing unique row).
     causal_chain = causal_graph.causal_chain_to(root_node_id) if root_node_id else []
     contributing: List[str] = [
         label
@@ -459,8 +586,9 @@ async def _run_investigation(
         if isinstance(label := c.get("label"), str) and label
     ]
     async with AsyncSessionLocal() as session:
-        await save_root_cause(
+        await upsert_root_cause(
             session,
+            tenant_id=tenant_id,
             incident_id=incident_id,
             root_cause=consensus.root_cause,
             confidence=consensus.confidence,
@@ -474,8 +602,9 @@ async def _run_investigation(
         )
         await session.commit()
 
-    # 9. Explainability
-    explanation = build_explanation(
+    # 9-10. Explainability and meta-reasoning (CPU-bound, off the loop).
+    explanation = await asyncio.to_thread(
+        build_explanation,
         incident_id=incident_id,
         findings=findings,
         consensus=consensus,
@@ -483,9 +612,8 @@ async def _run_investigation(
         propagation=propagation,
         root_cause_node_id=root_node_id,
     )
-
-    # 10. Meta-reasoning
-    meta = meta_evaluate(
+    meta = await asyncio.to_thread(
+        meta_evaluate,
         incident_id=incident_id,
         findings=findings,
         agents_skipped=tree_result.agents_skipped,
@@ -494,16 +622,19 @@ async def _run_investigation(
         agents_used=agents_used,
     )
 
-    # 11. Update incident status.  Findings were already persisted by the
-    # orchestrator (with root_cause_hint provenance) so a later confirmed
-    # resolution can grade each agent against ground truth.
+    # 11. Mark the investigation phase complete. Findings were already
+    #     persisted by the orchestrator (with root_cause_hint provenance) so a
+    #     later confirmed resolution can grade each agent against ground truth.
+    #     "analyzed" (not "investigating") closes the deduplication window;
+    #     leaving the row in a non-terminal state made it mergeable forever.
     async with AsyncSessionLocal() as session:
-        await update_incident(session, incident_id, status="investigating")
+        await update_incident(
+            session, incident_id, tenant_id=tenant_id, status="analyzed"
+        )
         await session.commit()
 
-    # 12. NO continuous learning here.  PRISM's consensus is an unverified
-    # hypothesis.  Learning is deferred to POST /incidents/{id}/resolve,
-    # which requires a confirmed (ground-truth) root cause.
+    # 12. NO continuous learning here.  Consensus is an unverified hypothesis.
+    #     Learning is deferred to POST /incidents/{id}/resolve.
 
     duration = time.perf_counter() - start
 
@@ -561,7 +692,10 @@ async def _run_investigation(
 
 async def _result_for_existing_incident(
     incident_id: str,
+    *,
+    tenant_id: str,
     reused: bool = False,
+    principal_role: str = "engineer",
 ) -> InvestigationResult:
     """Rebuild an :class:`InvestigationResult` from a previously persisted run.
 
@@ -571,10 +705,10 @@ async def _result_for_existing_incident(
     from database.session import AsyncSessionLocal
 
     async with AsyncSessionLocal() as session:
-        rc = await get_root_cause(session, incident_id)
+        rc = await get_root_cause(session, incident_id, tenant_id=tenant_id)
         if rc is None:
             raise HTTPException(409, "Earlier investigation left no root cause to replay")
-        findings = await list_findings(session, incident_id)
+        findings = await list_findings(session, incident_id, tenant_id=tenant_id)
 
     agent_statuses = _build_agent_statuses(findings)
     failed = [a["agent_name"] for a in agent_statuses if a["status"] == "failed"]
@@ -617,7 +751,7 @@ async def _result_for_existing_incident(
         duration_seconds=0.0,
         agent_statuses=[AgentStatus(**a) for a in agent_statuses],
         status="completed_with_degraded_agents" if failed else "completed",
-        runtime=_runtime_metadata(),
+        runtime=_runtime_metadata(principal_role),
     )
 
 
@@ -625,10 +759,15 @@ async def _stream_investigation(
     incident_in: IncidentCreate,
     request_id: str = "unknown",
     idempotency_key: Optional[str] = None,
+    tenant_id: Optional[str] = None,
+    principal_role: str = "engineer",
 ):
     """
     Generator that executes the investigation pipeline while yielding SSE events.
     """
+    if not tenant_id:
+        raise HTTPException(403, "No tenant is bound to this credential")
+
     start = time.perf_counter()
 
     def sse(event: str, data: dict) -> str:
@@ -641,39 +780,27 @@ async def _stream_investigation(
     })
 
     # 1. Redact sensitive data before persistence / LLM exposure.
-    from utils.redaction import scrub, scrub_collection, scrub_iterable
-    safe_logs = scrub_iterable(incident_in.raw_logs)
-    safe_metrics = scrub_collection(incident_in.metrics)
-    safe_traces = scrub_collection(incident_in.traces)
-    safe_topology = scrub_collection(incident_in.topology)
-    safe_context = scrub_collection(incident_in.context)
-    safe_description = scrub(incident_in.description or "") or None
+    safe_logs, safe_metrics, safe_traces, safe_topology, safe_context, safe_description = (
+        await asyncio.to_thread(_redact_evidence, incident_in)
+    )
 
     # 1. Persist the incident - use repository's create_incident which has built-in deduplication
     from database.session import AsyncSessionLocal
 
     async with AsyncSessionLocal() as session:
-        # create_incident automatically checks for similar existing incidents and updates them
-        inc = await create_incident(
-            session,
-            title=incident_in.title,
-            description=safe_description,
-            severity=incident_in.severity,
-            status="investigating",
-            incident_type=incident_in.incident_type,
-            affected_services=incident_in.affected_services,
-            raw_logs=safe_logs,
-            metrics=safe_metrics,
-            traces=safe_traces,
-            topology=safe_topology,
-            context=safe_context,
-            started_at=incident_in.started_at,
-        )
-        if idempotency_key and getattr(inc, "idempotency_key", None) != idempotency_key:
-            from database.repositories import update_incident as _upd
-            await _upd(session, inc.id, idempotency_key=idempotency_key)
+        existing = None
+        if idempotency_key:
+            existing = await get_incident_by_idempotency_key(
+                session, idempotency_key, tenant_id=tenant_id
+            )
+        if existing is not None:
+            incident_id = existing.id
+        else:
+            incident_id = await _persist_incident(
+                session, incident_in, safe_description, safe_logs, safe_metrics,
+                safe_traces, safe_topology, safe_context, tenant_id, idempotency_key,
+            )
         await session.commit()
-        incident_id = inc.id
 
     yield sse("incident_persisted", {
         "incident_id": incident_id,
@@ -684,6 +811,9 @@ async def _stream_investigation(
 
     # 2. Build context (already redacted)
     context: Dict[str, Any] = {
+        # Explicit: the ContextVar fallback is never populated in the streaming
+        # generator, which silently disabled the historical agent.
+        "tenant_id": tenant_id,
         "logs": safe_logs,
         "metrics": safe_metrics,
         "traces": safe_traces,
@@ -710,11 +840,11 @@ async def _stream_investigation(
 
     # Stream each agent finding
     for f in findings:
-        agent_name = (f.get("agent_name") or f.get("agent")) if isinstance(f, dict) else getattr(f, "agent_name", getattr(f, "agent", "analyzer"))
-        finding_type = f.get("finding_type", "analysis") if isinstance(f, dict) else getattr(f, "finding_type", "analysis")
-        conf_val = f.get("confidence", 0.5) if isinstance(f, dict) else getattr(f, "confidence", 0.5)
-        details = f.get("details", {}) if isinstance(f, dict) else getattr(f, "details", {})
-        summary = f.get("summary", "") if isinstance(f, dict) else getattr(f, "summary", "")
+        agent_name = _finding_field(f, "agent_name") or _finding_field(f, "agent", "analyzer")
+        finding_type = _finding_field(f, "finding_type", "analysis")
+        conf_val = _finding_field(f, "confidence", 0.5)
+        details = _finding_field(f, "details", {})
+        summary = _finding_field(f, "summary", "")
         if not summary and isinstance(details, dict):
             summary = details.get("description", "")
 
@@ -725,14 +855,10 @@ async def _stream_investigation(
             "summary": summary,
         })
 
-    # 4. Build causal graph
-    builder = CausalGraphBuilder()
-    causal_graph = builder.build_from_findings(
-        findings=findings,
-        affected_services=incident_in.affected_services,
-        logs=safe_logs,
-        metrics=safe_metrics,
-        traces=safe_traces,
+    # 4-6. Causal graph, propagation and candidates (CPU-bound, off the loop).
+    causal_graph, propagation, candidates = await asyncio.to_thread(
+        _build_graph_stage, findings, incident_in.affected_services, safe_logs,
+        safe_metrics, safe_traces,
     )
 
     nodes_list = causal_graph.nodes() if callable(causal_graph.nodes) else causal_graph.nodes
@@ -744,20 +870,18 @@ async def _stream_investigation(
         "message": f"Constructed causal graph with {len(nodes_list)} nodes and {len(edges_list)} edges",
     })
 
-    # 5. Confidence propagation
-    propagation = propagate(causal_graph, iterations=5)
-
-    # 6. Graph candidates
-    candidates = causal_graph.find_root_causes(top_k=5)
     root_node_id = candidates[0]["node_id"] if candidates else None
+    # Keyed by graph node id, not display label: the consensus engine looks this
+    # up with a natural-language hypothesis, so a label key made the graph
+    # evidence channel unreachable.
     graph_candidates = {
-        candidate["label"]: candidate.get("confidence", 0.0)
+        str(candidate.get("node_id")): float(candidate.get("confidence") or 0.0)
         for candidate in candidates
-        if candidate.get("label")
+        if candidate.get("node_id")
     }
 
     yield sse("confidence_propagated", {
-        "iterations": 5,
+        "iterations": settings.propagation_iterations,
         "candidate_count": len(candidates),
         "top_candidate": candidates[0].get("label") if candidates else None,
     })
@@ -768,14 +892,16 @@ async def _stream_investigation(
         reliability_scores=tree_result.reliability_scores,
         graph_candidates=graph_candidates,
     )
-    consensus = apply_graph_traversal_fallback(consensus, candidates, enable_fallback=False)
+    consensus = apply_graph_traversal_fallback(
+        consensus, candidates, enable_fallback=settings.graph_traversal_fallback
+    )
 
     yield sse("consensus_reached", {
         "root_cause": consensus.root_cause,
         "confidence": round(float(consensus.confidence), 3),
         "alternatives_count": len(consensus.alternatives),
     })
-    
+
     # Emit verdict event for backward compatibility with tests
     yield sse("verdict", {
         "root_cause": consensus.root_cause,
@@ -783,7 +909,8 @@ async def _stream_investigation(
         "explanation": consensus.explanation,
     })
 
-    # 8. Persist root cause
+    # 8. Persist root cause (upsert: a deduplicated repeat run must not raise
+    #    IntegrityError against the existing unique row).
     causal_chain = causal_graph.causal_chain_to(root_node_id) if root_node_id else []
     contributing: List[str] = [
         label
@@ -791,8 +918,9 @@ async def _stream_investigation(
         if isinstance(label := c.get("label"), str) and label
     ]
     async with AsyncSessionLocal() as session:
-        await save_root_cause(
+        await upsert_root_cause(
             session,
+            tenant_id=tenant_id,
             incident_id=incident_id,
             root_cause=consensus.root_cause,
             confidence=consensus.confidence,
@@ -806,8 +934,9 @@ async def _stream_investigation(
         )
         await session.commit()
 
-    # 9. Explainability
-    explanation = build_explanation(
+    # 9. Explainability (CPU-bound, off the loop)
+    explanation = await asyncio.to_thread(
+        build_explanation,
         incident_id=incident_id,
         findings=findings,
         consensus=consensus,
@@ -820,8 +949,9 @@ async def _stream_investigation(
         "summary": consensus.root_cause,
     })
 
-    # 10. Meta-reasoning
-    meta = meta_evaluate(
+    # 10. Meta-reasoning (CPU-bound, off the loop)
+    meta = await asyncio.to_thread(
+        meta_evaluate,
         incident_id=incident_id,
         findings=findings,
         agents_skipped=tree_result.agents_skipped,
@@ -830,10 +960,12 @@ async def _stream_investigation(
         agents_used=agents_used,
     )
 
-    # 11. Update incident status.  Findings were already persisted by the
-    # orchestrator (with root_cause_hint provenance).
+    # 11. Mark the investigation phase complete; "analyzed" closes the
+    #     deduplication window that a lingering "investigating" kept open.
     async with AsyncSessionLocal() as session:
-        await update_incident(session, incident_id, status="investigating")
+        await update_incident(
+            session, incident_id, tenant_id=tenant_id, status="analyzed"
+        )
         await session.commit()
 
     # 12. NO learning here (unverified consensus).  Learning only runs after
@@ -895,7 +1027,7 @@ async def _stream_investigation(
         duration_seconds=round(duration, 3),
         agent_statuses=[AgentStatus(**a) for a in agent_statuses],
         status="completed_with_degraded_agents" if failed else "completed",
-        runtime=_runtime_metadata(),
+        runtime=_runtime_metadata(principal_role),
     )
 
     yield sse("investigation_result", final_result.model_dump())
@@ -910,28 +1042,43 @@ async def investigate_stream(
     incident_in: IncidentCreate,
     request: Request,
     _api_key: str = Depends(require_api_key),
+    tenant: str = Depends(require_tenant),
     x_idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key"),
 ):
     """
     Run the full agentic investigation pipeline while streaming real-time SSE events.
     """
     request_id = getattr(request.state, "request_id", None) or "unknown"
+    role = getattr(getattr(request.state, "principal", None), "role", "engineer")
     idem_key = (x_idempotency_key or "").strip()[:128] or None
 
-    async def event_generator():
-        acquired = False
-        try:
-            try:
-                await asyncio.wait_for(
-                    _investigation_semaphore.acquire(),
-                    timeout=_ACQUIRE_TIMEOUT,
-                )
-                acquired = True
-            except asyncio.TimeoutError:
-                err_data = json.dumps({"error": f"Too many concurrent investigations (limit={settings.max_concurrent_investigations})."})
-                yield f"event: error\ndata: {err_data}\n\n"
-                return
+    # The SSE path bypassed the rate limiter entirely, so it was the cheapest
+    # way to saturate the agent pool.
+    allowed, retry_after = await _rate_limiter.check(
+        _rate_limit_key(request, tenant, _api_key)
+    )
+    if not allowed:
+        logger.warning(
+            "investigation_rate_limited",
+            extra={"request_id": request_id, "route": "/investigate/stream"},
+        )
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=(
+                f"Rate limit exceeded ({settings.investigation_rate_limit}). "
+                "Try again shortly."
+            ),
+            headers={"Retry-After": str(max(1, int(retry_after + 0.999)))},
+        )
 
+    # Capacity is checked here, not inside the generator: once
+    # StreamingResponse starts the body the status line is already sent, so an
+    # over-capacity rejection could only ever be delivered as an SSE error
+    # event on an already-200 response.
+    await _acquire_investigation_slot(request)
+
+    async def event_generator():
+        try:
             # Idempotency replay: return the already-persisted result as the
             # final SSE event without re-running any agents.
             if idem_key:
@@ -939,19 +1086,37 @@ async def investigate_stream(
                 from database.session import AsyncSessionLocal
 
                 async with AsyncSessionLocal() as session:
-                    existing = await get_incident_by_idempotency_key(session, idem_key)
+                    existing = await get_incident_by_idempotency_key(
+                        session, idem_key, tenant_id=tenant
+                    )
                     existing_id = existing.id if existing is not None else None
                 if existing_id is not None:
                     yield f"event: idempotent_replay\ndata: {json.dumps({'incident_id': existing_id, 'detail': 'Investigation previously run under this Idempotency-Key.'})}\n\n"
-                    result = await _result_for_existing_incident(existing_id, reused=True)
+                    result = await _result_for_existing_incident(
+                        existing_id, tenant_id=tenant, reused=True, principal_role=role
+                    )
                     yield f"event: investigation_result\ndata: {json.dumps(result.model_dump())}\n\n"
                     return
 
-            async for chunk in _stream_investigation(incident_in, request_id=request_id, idempotency_key=idem_key):
+            async for chunk in _stream_investigation(
+                incident_in,
+                request_id=request_id,
+                idempotency_key=idem_key,
+                tenant_id=tenant,
+                principal_role=role,
+            ):
                 yield chunk
+        except HTTPException as exc:
+            # Raised once streaming has begun: report as an SSE error frame
+            # rather than tearing the connection down without explanation.
+            yield f"event: error\ndata: {json.dumps({'error': exc.detail})}\n\n"
+        except Exception:
+            logger.exception(
+                "investigation_stream_failed", extra={"request_id": request_id}
+            )
+            yield 'event: error\ndata: {"error": "Investigation failed"}\n\n'
         finally:
-            if acquired:
-                _investigation_semaphore.release()
+            _investigation_semaphore.release()
 
     return StreamingResponse(
         event_generator(),
@@ -973,8 +1138,8 @@ async def investigate_async(
     incident_in: IncidentCreate,
     request: Request,
     _api_key: str = Depends(require_api_key),
+    tenant: str = Depends(require_tenant),
     x_idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key"),
-    x_tenant_id: Optional[str] = Header(default=None, alias="X-Tenant-Id"),
 ) -> JobOut:
     """
     Enqueue an investigation and return immediately (``202 Accepted``).
@@ -992,7 +1157,6 @@ async def investigate_async(
 
     request_id = getattr(request.state, "request_id", None) or "unknown"
     idem_key = (x_idempotency_key or "").strip()[:128] or None
-    tenant = _enforce_tenant(x_tenant_id)
 
     allowed, retry_after = await _rate_limiter.check(
         _rate_limit_key(request, tenant, _api_key)
@@ -1040,7 +1204,7 @@ async def investigate_async(
             extra={"request_id": request_id, "job_id": job.id},
         )
 
-    return await _job_to_out(job)
+    return await _job_to_out(job, tenant_id=tenant)
 
 
 # ---------------------------------------------------------------
@@ -1051,55 +1215,61 @@ async def investigate_async(
 async def list_jobs_endpoint(
     limit: int = Query(default=50, ge=1, le=settings.max_pagination_limit),
     _api_key: str = Depends(require_api_key),
-    x_tenant_id: Optional[str] = Header(default=None, alias="X-Tenant-Id"),
+    tenant: str = Depends(require_tenant),
 ) -> List[JobOut]:
     from database.repositories import list_jobs
     from database.session import AsyncSessionLocal
 
-    tenant = _enforce_tenant(x_tenant_id)
     async with AsyncSessionLocal() as session:
         jobs = await list_jobs(session, limit=limit, tenant_id=tenant)
-    return [await _job_to_out(j) for j in jobs]
+    # One batched incident fetch for the whole page instead of one DB session
+    # per job.
+    return await _jobs_to_out(jobs, tenant_id=tenant)
 
 
 @router.get("/jobs/{job_id}", response_model=JobOut)
 async def get_job_endpoint(
     job_id: str,
     _api_key: str = Depends(require_api_key),
-    x_tenant_id: Optional[str] = Header(default=None, alias="X-Tenant-Id"),
+    tenant: str = Depends(require_tenant),
 ) -> JobOut:
     from database.repositories import get_job
     from database.session import AsyncSessionLocal
 
-    tenant = _enforce_tenant(x_tenant_id)
     async with AsyncSessionLocal() as session:
         job = await get_job(session, job_id, tenant_id=tenant)
     if job is None:
         raise HTTPException(404, "Job not found")
-    return await _job_to_out(job)
+    return await _job_to_out(job, tenant_id=tenant)
 
 
 @router.post("/jobs/{job_id}/cancel", response_model=JobOut)
 async def cancel_job_endpoint(
     job_id: str,
     _api_key: str = Depends(require_api_key),
-    x_tenant_id: Optional[str] = Header(default=None, alias="X-Tenant-Id"),
+    tenant: str = Depends(require_tenant),
 ) -> JobOut:
     from database.repositories import cancel_job, get_job
     from database.session import AsyncSessionLocal
 
-    tenant = _enforce_tenant(x_tenant_id)
     async with AsyncSessionLocal() as session:
         job = await get_job(session, job_id, tenant_id=tenant)
         if job is None:
             raise HTTPException(404, "Job not found")
-        await cancel_job(session, job_id, tenant_id=tenant)
+        # cancel_job reports whether it actually performed the transition.
+        # Cancelling an already-cancelled job is idempotent (200, true state);
+        # cancelling one that already reached a terminal state is a genuine
+        # conflict, so the caller is not told the cancel succeeded.
+        cancelled, job = await cancel_job(session, job_id, tenant_id=tenant)
+        if job.status not in {"queued", "running", "cancelled"}:
+            await session.rollback()
+            raise HTTPException(409, f"Job is not cancellable (status={job.status})")
         await session.commit()
-        # updated_at is refreshed server-side on commit; re-read it while the
-        # row is still attached so _job_to_out never touches an expired attr.
+        # The UPDATE expired every column on this instance, so reading
+        # job.updated_at would trigger a lazy refresh outside greenlet
+        # context (MissingGreenlet). Refresh explicitly, while attached.
         await session.refresh(job)
-    return await _job_to_out(job)
-
+        return await _job_to_out(job, tenant_id=tenant)
 
 
 # ---------------------------------------------------------------
@@ -1110,14 +1280,12 @@ async def cancel_job_endpoint(
 async def list_recent_incidents(
     limit: int = Query(default=50, ge=1, le=settings.max_pagination_limit),
     _api_key: str = Depends(require_api_key),
-    x_tenant_id: Optional[str] = Header(default=None, alias="X-Tenant-Id"),
+    tenant: str = Depends(require_tenant),
 ) -> List[IncidentOut]:
     from database.session import AsyncSessionLocal
 
     async with AsyncSessionLocal() as session:
-        rows = await list_incidents(
-            session, limit=limit, tenant_id=_enforce_tenant(x_tenant_id)
-        )
+        rows = await list_incidents(session, limit=limit, tenant_id=tenant)
     return [IncidentOut.model_validate(r) for r in rows]
 
 
@@ -1129,14 +1297,12 @@ async def list_recent_incidents(
 async def get_incident_by_id(
     incident_id: str,
     _api_key: str = Depends(require_api_key),
-    x_tenant_id: Optional[str] = Header(default=None, alias="X-Tenant-Id"),
+    tenant: str = Depends(require_tenant),
 ) -> IncidentOut:
     from database.session import AsyncSessionLocal
 
     async with AsyncSessionLocal() as session:
-        inc = await get_incident(
-            session, incident_id, tenant_id=_enforce_tenant(x_tenant_id)
-        )
+        inc = await get_incident(session, incident_id, tenant_id=tenant)
     if inc is None:
         raise HTTPException(404, "Incident not found")
     return IncidentOut.model_validate(inc)
@@ -1150,17 +1316,15 @@ async def get_incident_by_id(
 async def get_root_cause_for_incident(
     incident_id: str,
     _api_key: str = Depends(require_api_key),
-    x_tenant_id: Optional[str] = Header(default=None, alias="X-Tenant-Id"),
+    tenant: str = Depends(require_tenant),
 ) -> RootCauseOut:
     from database.session import AsyncSessionLocal
 
     async with AsyncSessionLocal() as session:
-        inc = await get_incident(
-            session, incident_id, tenant_id=_enforce_tenant(x_tenant_id)
-        )
+        inc = await get_incident(session, incident_id, tenant_id=tenant)
         if inc is None:
             raise HTTPException(404, "Incident not found")
-        rc = await get_root_cause(session, incident_id)
+        rc = await get_root_cause(session, incident_id, tenant_id=tenant)
     if rc is None:
         raise HTTPException(404, "Root cause not found")
     return RootCauseOut(
@@ -1190,7 +1354,7 @@ async def resolve_incident(
     incident_id: str,
     body: ResolutionCreate,
     _api_key: str = Depends(require_api_key),
-    x_tenant_id: Optional[str] = Header(default=None, alias="X-Tenant-Id"),
+    tenant: str = Depends(require_tenant),
 ) -> ResolutionOut:
     """
     Record an engineer-supplied resolution.
@@ -1206,12 +1370,10 @@ async def resolve_incident(
 
     from database.session import AsyncSessionLocal
 
-    tenant = _enforce_tenant(x_tenant_id)
-
     async def _existing_out() -> ResolutionOut:
         """Build the response from an already-persisted resolution (idempotent replay)."""
         async with AsyncSessionLocal() as _s:
-            existing = await get_resolution(_s, incident_id)
+            existing = await get_resolution(_s, incident_id, tenant_id=tenant)
         meta = (existing.metadata_ or {}) if existing else {}
         return ResolutionOut(
             incident_id=incident_id,
@@ -1233,8 +1395,8 @@ async def resolve_incident(
                 # Idempotent replay: a repeated resolve returns the existing
                 # resolution instead of failing with 409.
                 return await _existing_out()
-            rc = await get_root_cause(session, incident_id)
-            findings = await list_findings(session, incident_id)
+            rc = await get_root_cause(session, incident_id, tenant_id=tenant)
+            findings = await list_findings(session, incident_id, tenant_id=tenant)
             affected_services = list(inc.affected_services or [])
             raw_logs = list(inc.raw_logs or [])
             rc_confidence = rc.confidence if rc else 0.5
@@ -1248,6 +1410,7 @@ async def resolve_incident(
             }
             res = await save_resolution(
                 session,
+                tenant_id=tenant,
                 incident_id=incident_id,
                 action=body.action,
                 steps=body.steps,
@@ -1257,6 +1420,7 @@ async def resolve_incident(
             await update_incident(
                 session,
                 incident_id,
+                tenant_id=tenant,
                 status="resolved",
                 resolved_at=datetime.now(timezone.utc),
             )
@@ -1280,6 +1444,7 @@ async def resolve_incident(
         ]
         learning_input = LearningInput(
             incident_id=incident_id,
+            tenant_id=tenant,
             root_cause=confirmed_rc,
             confidence=body.ground_truth_confidence or rc_confidence,
             affected_services=affected_services,

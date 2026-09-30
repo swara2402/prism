@@ -25,11 +25,21 @@ from database import models as dbm
 from learning.continuous_learning import LearningInput, learn_from_incident
 
 _AUTH = {"X-API-Key": "test-api-key-that-is-long-enough-32chars"}
+_TENANT = "learning-tenant"
+
+
+async def _seed_incident(db_session, incident_id: str, *, tenant_id: str = _TENANT) -> None:
+    """Learning verifies tenant ownership against a stored incident row."""
+    from tests.conftest import make_incident
+
+    await make_incident(db_session, incident_id, tenant_id=tenant_id)
+    await db_session.commit()
 
 
 def _make_input(**overrides):
     base = dict(
         incident_id="inc-learning-1",
+        tenant_id=_TENANT,
         root_cause=None,
         confidence=0.9,
         affected_services=["web-svc"],
@@ -85,20 +95,12 @@ def test_learn_refused_without_confirmed_root_cause():
 
 
 def test_learn_is_noop_in_frozen_mode(monkeypatch):
-    """LEARNING_MODE=frozen keeps evaluation runs independent.
-
-    test_api.py's client fixture purges config/database/main/api modules
-    (but not ``learning``), which swaps the cached settings singleton
-    under an already-imported continuous_learning. Reimport both together
-    so the monkeypatched mode is the one the learner actually reads.
-    """
-    for mod in list(sys.modules.keys()):
-        if mod.startswith(("config", "learning")):
-            del sys.modules[mod]
-
+    """LEARNING_MODE=frozen keeps evaluation runs independent."""
     from config.settings import settings
     from learning.continuous_learning import learn_from_incident
 
+    # The settings singleton is stable now that no fixture purges ``config``
+    # from sys.modules, so a plain monkeypatch is picked up by the learner.
     monkeypatch.setattr(settings, "learning_mode", "frozen")
     inp = _make_input()
     loop = asyncio.new_event_loop()
@@ -115,6 +117,7 @@ def test_learn_is_noop_in_frozen_mode(monkeypatch):
 async def test_learn_confirmed_updates_memory_patterns_and_reliability(db_session):
     """A confirmed resolution with ground truth triggers full learning."""
     inp = _make_input(incident_id="inc-confirmed-1")
+    await _seed_incident(db_session, inp.incident_id)
     summary = await learn_from_incident(inp)
 
     assert summary["learned"] is True
@@ -162,6 +165,7 @@ async def test_reliability_stays_flat_without_ground_truth_source(db_session):
         ground_truth_source=None,
         confirmed_by="sre-alice",  # source is what matters for grading
     )
+    await _seed_incident(db_session, inp.incident_id)
     summary = await learn_from_incident(inp)
 
     assert summary["learned"] is True
@@ -181,6 +185,7 @@ async def test_reliability_source_must_be_an_allowed_provenance(db_session):
         incident_id="inc-confirmed-3",
         ground_truth_source="llm_guess",  # not independent ground truth
     )
+    await _seed_incident(db_session, inp.incident_id)
     summary = await learn_from_incident(inp)
     assert summary["learned"] is True
     assert summary["agent_reliability_updated"] is False
@@ -191,40 +196,7 @@ async def test_reliability_source_must_be_an_allowed_provenance(db_session):
 # API-level behaviour
 # ---------------------------------------------------------------
 
-@pytest.fixture
-def client():
-    """API client with lifespan entered so tables exist.
-
-    Shadows the conftest ``client`` fixture: conftest's version returns
-    ``TestClient(app)`` without entering lifespan, so the in-memory DB
-    never gets its tables and investigating 401s. test_api.py does the
-    same (purge modules, create tables, enter lifespan, send the API key).
-    """
-    # Force reimport of settings + app so env vars are picked up
-    for mod in list(sys.modules.keys()):
-        if mod.startswith(("config", "database", "main", "api")):
-            del sys.modules[mod]
-
-    from fastapi.testclient import TestClient
-    from database.session import Base, engine
-    from main import app
-
-    # Create tables synchronously via the engine
-    import asyncio
-
-    async def _init():
-        async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
-
-    asyncio.run(_init())
-
-    with TestClient(app, headers=_AUTH) as c:
-        yield c
-
-
 def _query_counts_for_incident(incident_id: str):
-    # Import fresh so we hit the engine/database created by the client
-    # fixture (which purges and reinstates modules).
     from database import models as _dbm
     from database.session import AsyncSessionLocal
     from sqlalchemy import select as _select, func as _func
