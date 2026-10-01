@@ -83,7 +83,7 @@ async def persist_patterns(incident_id: str, patterns: Sequence[GeneratedPattern
         if not await _incident_belongs_to_tenant(session, incident_id, tenant_id):
             raise ValueError("Incident does not belong to the requested tenant")
         for p in patterns:
-            existing = await get_pattern_by_signature(session, p.pattern_signature)
+            existing = await get_pattern_by_signature(session, p.pattern_signature, tenant_id=tenant_id)
             if existing is not None:
                 source_ids = set(existing.incident_ids or [])
                 if not any(await _incident_belongs_to_tenant(session, iid, tenant_id) for iid in source_ids):
@@ -100,6 +100,7 @@ async def persist_patterns(incident_id: str, patterns: Sequence[GeneratedPattern
                 confidence=p.confidence,
                 approved=False,
                 incident_ids=[incident_id],
+                tenant_id=tenant_id,
             )
             created.append(rec.id)
         await session.commit()
@@ -118,7 +119,7 @@ async def approve_pattern_by_id(pattern_id: str, approver: str, *, tenant_id: st
             for iid in (pattern.incident_ids or [])
         ):
             return False
-        return await approve_pattern(session, pattern_id, approver)
+        return await approve_pattern(session, pattern_id, approver, tenant_id=tenant_id)
 
 
 async def match_approved_patterns(logs: Sequence[str], *, tenant_id: str | None = None) -> List[Dict[str, Any]]:
