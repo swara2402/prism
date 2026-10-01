@@ -6,7 +6,7 @@ Endpoints for the Predictive Incident Engine.
 """
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, List, Optional, cast
 
 from fastapi import APIRouter, Depends, Query
@@ -53,8 +53,8 @@ async def run_predictions(
             estimated_time_minutes=p.estimated_time_minutes,
             impact=p.impact,
             rationale=p.rationale,
-            created_at=cast(datetime, getattr(p, "created_at", None)),
-            updated_at=cast(datetime, getattr(p, "updated_at", getattr(p, "created_at", None))),
+            created_at=cast(datetime, getattr(p, "created_at", None) or datetime.now(timezone.utc)),
+            updated_at=cast(datetime, getattr(p, "updated_at", None) or getattr(p, "created_at", None) or datetime.now(timezone.utc)),
         )
         for p in preds
     ]
