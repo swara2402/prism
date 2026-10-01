@@ -38,6 +38,11 @@ logger = get_logger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     logger.info("app_startup", extra={"env": settings.app_env, "host": settings.app_host, "port": settings.app_port})
+    if settings.is_production and settings.run_migrations_on_startup:
+        import subprocess
+        logger.info("production_migrations_starting")
+        subprocess.run(["alembic", "upgrade", "head"], check=True)
+        logger.info("production_migrations_complete")
     await init_db()
     await bootstrap_owner()
     KnowledgeGraphStore.get()
