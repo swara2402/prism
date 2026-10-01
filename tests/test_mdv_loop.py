@@ -265,6 +265,7 @@ async def test_run_tree_single_action_loop():
     context = {
         "incident_id": "INC-TEST-100",
         "incident_type": "network_incident",
+        "tenant_id": "test-tenant",
         "logs": ["Network timeout connecting to host DB"],
         "metrics": {"latency_ms": 450.0},
         "hypotheses": {"database_failure": 0.5, "network_failure": 0.5},
