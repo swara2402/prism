@@ -108,3 +108,21 @@ def test_harmonic_mean():
     assert harmonic_mean([1.0, 1.0, 1.0]) == 1.0
     assert harmonic_mean([0.0, 1.0]) == 0.0
     assert harmonic_mean([]) == 0.0
+
+
+def test_hypothesis_entropy_ignores_invalid_scores():
+    from investigation.metrics import shannon_entropy
+    assert abs(shannon_entropy({"a": 1.0, "b": 1.0}) - 1.0) < 1e-6
+    assert shannon_entropy({"a": 1.0, "bad": float("nan")}) == 0.0
+
+
+def test_mdv_rejects_non_finite_inputs():
+    from investigation.value_engine import compute_mdv
+    action = {
+        "discrimination_score": float("nan"),
+        "expected_uncertainty_reduction": float("inf"),
+        "evidence_value": 1.0,
+        "reliability_score": 1.0,
+        "execution_cost": 0.0,
+    }
+    assert 0.0 <= compute_mdv(action) <= 1.0
