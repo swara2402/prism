@@ -17,9 +17,16 @@ from config.logging import get_logger
 
 logger = get_logger(__name__)
 
-# Directory where experiment logs are stored. Ensure it exists.
-_LOG_DIR = settings.data_dir / "experiments"
-_LOG_DIR.mkdir(parents=True, exist_ok=True)
+# Resolve the directory lazily. Importing this optional logger must never
+# require filesystem write access in a production container.
+_LOG_DIR: Path | None = None
+
+def _log_dir() -> Path:
+    global _LOG_DIR
+    if _LOG_DIR is None:
+        _LOG_DIR = settings.data_dir / "experiments"
+        _LOG_DIR.mkdir(parents=True, exist_ok=True)
+    return _LOG_DIR
 
 
 def _log_path(incident_id: str) -> Path:
