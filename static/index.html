@@ -66,7 +66,7 @@
   <symbol id="i-activity" viewBox="0 0 24 24"><path d="M3 12h4l2.5-6 4.5 12L17 12h4"/></symbol>
 </svg>
 
-<div class="app">
+<div class="app ui-v2">
   <!-- ============ SIDEBAR ============ -->
   <aside class="sidebar" id="sidebar">
     <div class="brand">
@@ -121,30 +121,59 @@
 
       <!-- ===== OVERVIEW ===== -->
       <section class="view active" data-view="overview" id="view-overview">
-        <div class="demo-hero">
-          <div>
-            <span class="demo-kicker">PRISM INCIDENT COMMAND</span>
-            <h2>Turn production evidence into an explainable root cause.</h2>
-            <p>Run a guided incident scenario to see agents, evidence convergence, causal reasoning and confidence in one flow.</p>
+        <div class="demo-hero ui-hero">
+          <div class="ui-hero-copy">
+            <div class="ui-eyebrow"><span class="status-dot ok"></span> INCIDENT COMMAND · LIVE</div>
+            <h2>See the incident. Understand the cause. Act with confidence.</h2>
+            <p>WayPoint brings evidence, specialist agents, causal reasoning and confidence into one investigation workflow.</p>
           </div>
           <div class="demo-actions">
             <button class="btn btn-primary" id="overview-demo"><svg class="ic"><use href="#i-run"/></svg>Run demo investigation</button>
-            <button class="btn btn-ghost" id="overview-investigate">Custom investigation</button>
+            <button class="btn btn-ghost" id="overview-investigate">New investigation</button>
           </div>
         </div>
-        <div class="stats-grid" id="ov-stats"></div>
-        <div class="grid-2">
-          <div class="panel">
+
+        <div class="ui-section-intro">
+          <div>
+            <span class="sec-label">COMMAND PULSE</span>
+            <h3>What is happening right now</h3>
+          </div>
+          <span class="hint">Live operational signals from the current workspace</span>
+        </div>
+        <div class="stats-grid ui-command-stats" id="ov-stats"></div>
+
+        <div class="ui-overview-grid">
+          <div class="panel ui-primary-panel">
             <div class="panel-head">
-              <span class="sec-label">Recent incidents</span>
+              <div>
+                <span class="sec-label">Recent incidents</span>
+                <div class="panel-caption">Latest events requiring attention</div>
+              </div>
               <button class="link link-sm" data-go="incidents">View all <svg class="ic"><use href="#i-chevron"/></svg></button>
             </div>
             <div class="table-wrap"><div id="ov-incidents" class="skeleton-rows" aria-busy="true"></div></div>
           </div>
-          <div class="panel">
-            <div class="panel-head"><span class="sec-label">Agent reliability</span></div>
+
+          <div class="panel ui-intelligence-panel">
+            <div class="panel-head">
+              <div>
+                <span class="sec-label">Agent reliability</span>
+                <div class="panel-caption">How much to trust each specialist signal</div>
+              </div>
+              <button class="link link-sm" data-go="agents">Agents <svg class="ic"><use href="#i-chevron"/></svg></button>
+            </div>
             <div id="ov-agents" class="skeleton-rows" aria-busy="true"></div>
           </div>
+        </div>
+
+        <div class="ui-flow-strip" aria-label="WayPoint investigation workflow">
+          <div class="ui-flow-step"><span>01</span><b>Collect</b><small>Logs · metrics · traces</small></div>
+          <div class="ui-flow-line"></div>
+          <div class="ui-flow-step"><span>02</span><b>Reason</b><small>Agents · hypotheses · evidence</small></div>
+          <div class="ui-flow-line"></div>
+          <div class="ui-flow-step"><span>03</span><b>Converge</b><small>Consensus · causal graph</small></div>
+          <div class="ui-flow-line"></div>
+          <div class="ui-flow-step"><span>04</span><b>Explain</b><small>Root cause · confidence · action</small></div>
         </div>
       </section>
 
