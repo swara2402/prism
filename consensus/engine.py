@@ -46,6 +46,16 @@ class ConsensusResult:
     voter_breakdown: Dict[str, Dict[str, Any]]
 
 
+def _finite_unit(value: Any) -> float:
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    if value != value or value in (float("inf"), float("-inf")):
+        return 0.0
+    return max(0.0, min(1.0, value))
+
+
 def _normalize(s: str) -> str:
     s = s.lower().strip()
     s = re.sub(r"[^a-z0-9 ]+", " ", s)
@@ -107,11 +117,11 @@ async def reach_consensus(
             VoterOpinion(
                 voter=str(f.get("agent_name", "unknown")),
                 root_cause_hint=f.get("root_cause_hint"),
-                confidence=max(0.0, min(1.0, float(f.get("confidence", 0.0)))),
-                reliability=max(0.0, min(1.0, float((reliability_scores or {}).get(
+                confidence=_finite_unit(f.get("confidence", 0.0)),
+                reliability=_finite_unit((reliability_scores or {}).get(
                     str(f.get("agent_name", "unknown")),
                     get_reliability(context_key, str(f.get("agent_name", "unknown"))),
-                )))),
+                )),
                 evidence=f.get("evidence", {}) or {},
                 hypotheses=list(f.get("hypotheses", []) or []),
                 source_type=provenance.get("source_type", "rule"),
@@ -145,7 +155,7 @@ async def reach_consensus(
         if graph_score == 0.0:
             normalized_rep = _normalize(rep)
             graph_score = max(
-                (float(score) for label, score in graph_scores.items()
+                (_finite_unit(score) for label, score in graph_scores.items()
                  if _normalize(str(label)) == normalized_rep),
                 default=0.0,
             )
