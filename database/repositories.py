@@ -382,8 +382,9 @@ async def get_resolution(
 
 # ---------- Lessons ----------
 
-async def add_lesson(session: AsyncSession, **kwargs: Any) -> dbm.LessonLearned:
-    lesson = dbm.LessonLearned(**kwargs)
+async def add_lesson(session: AsyncSession, *, tenant_id: Optional[str] = None, **kwargs: Any) -> dbm.LessonLearned:
+    tenant_id = _require_tenant(tenant_id, "add_lesson")
+    lesson = dbm.LessonLearned(tenant_id=tenant_id, **kwargs)
     session.add(lesson)
     await session.flush()
     return lesson
@@ -391,18 +392,23 @@ async def add_lesson(session: AsyncSession, **kwargs: Any) -> dbm.LessonLearned:
 
 # ---------- Patterns ----------
 
-async def create_pattern(session: AsyncSession, **kwargs: Any) -> dbm.Pattern:
-    p = dbm.Pattern(**kwargs)
+async def create_pattern(session: AsyncSession, *, tenant_id: Optional[str] = None, **kwargs: Any) -> dbm.Pattern:
+    tenant_id = _require_tenant(tenant_id, "create_pattern")
+    p = dbm.Pattern(tenant_id=tenant_id, **kwargs)
     session.add(p)
     await session.flush()
     return p
 
 
 async def get_pattern_by_signature(
-    session: AsyncSession, signature: str
+    session: AsyncSession, signature: str, *, tenant_id: Optional[str] = None
 ) -> Optional[dbm.Pattern]:
+    tenant_id = _require_tenant(tenant_id, "get_pattern_by_signature")
     res = await session.execute(
-        select(dbm.Pattern).where(dbm.Pattern.pattern_signature == signature)
+        select(dbm.Pattern).where(
+            dbm.Pattern.pattern_signature == signature,
+            dbm.Pattern.tenant_id == tenant_id,
+        )
     )
     return res.scalars().first()
 
@@ -433,11 +439,12 @@ async def list_pending_patterns(
 
 
 async def approve_pattern(
-    session: AsyncSession, pattern_id: str, approver: str
+    session: AsyncSession, pattern_id: str, approver: str, *, tenant_id: Optional[str] = None
 ) -> bool:
+    tenant_id = _require_tenant(tenant_id, "approve_pattern")
     res = await session.execute(
         update(dbm.Pattern)
-        .where(dbm.Pattern.id == pattern_id)
+        .where(dbm.Pattern.id == pattern_id, dbm.Pattern.tenant_id == tenant_id)
         .values(approved=True, approved_by=approver)
     )
     await session.commit()
@@ -446,8 +453,9 @@ async def approve_pattern(
 
 # ---------- Incident Memory ----------
 
-async def add_memory(session: AsyncSession, **kwargs: Any) -> dbm.IncidentMemory:
-    m = dbm.IncidentMemory(**kwargs)
+async def add_memory(session: AsyncSession, *, tenant_id: Optional[str] = None, **kwargs: Any) -> dbm.IncidentMemory:
+    tenant_id = _require_tenant(tenant_id, "add_memory")
+    m = dbm.IncidentMemory(tenant_id=tenant_id, **kwargs)
     session.add(m)
     await session.flush()
     return m
@@ -456,9 +464,8 @@ async def add_memory(session: AsyncSession, **kwargs: Any) -> dbm.IncidentMemory
 async def list_memory(
     session: AsyncSession, limit: int = 1000, *, tenant_id: Optional[str] = None
 ) -> Sequence[dbm.IncidentMemory]:
-    stmt = select(dbm.IncidentMemory)
-    if tenant_id is not None:
-        stmt = stmt.where(dbm.IncidentMemory.tenant_id == tenant_id)
+    tenant_id = _require_tenant(tenant_id, "list_memory")
+    stmt = select(dbm.IncidentMemory).where(dbm.IncidentMemory.tenant_id == tenant_id)
     res = await session.execute(
         stmt.order_by(dbm.IncidentMemory.created_at.desc()).limit(limit)
     )
@@ -470,9 +477,11 @@ async def list_memory(
 async def get_agent_reliability(
     session: AsyncSession, agent_name: str, *, tenant_id: Optional[str] = None
 ) -> Optional[dbm.AgentReliability]:
-    stmt = select(dbm.AgentReliability).where(dbm.AgentReliability.agent_name == agent_name)
-    if tenant_id is not None:
-        stmt = stmt.where(dbm.AgentReliability.tenant_id == tenant_id)
+    tenant_id = _require_tenant(tenant_id, "get_agent_reliability")
+    stmt = select(dbm.AgentReliability).where(
+        dbm.AgentReliability.agent_name == agent_name,
+        dbm.AgentReliability.tenant_id == tenant_id,
+    )
     res = await session.execute(stmt)
     return res.scalars().first()
 
@@ -495,9 +504,8 @@ async def upsert_agent_reliability(
 async def list_agent_reliabilities(
     session: AsyncSession, *, tenant_id: Optional[str] = None
 ) -> Sequence[dbm.AgentReliability]:
-    stmt = select(dbm.AgentReliability)
-    if tenant_id is not None:
-        stmt = stmt.where(dbm.AgentReliability.tenant_id == tenant_id)
+    tenant_id = _require_tenant(tenant_id, "list_agent_reliabilities")
+    stmt = select(dbm.AgentReliability).where(dbm.AgentReliability.tenant_id == tenant_id)
     res = await session.execute(stmt)
     return res.scalars().all()
 
