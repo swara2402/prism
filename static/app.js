@@ -578,6 +578,8 @@ async function startPipeline(payload) {
     const headers = { "Content-Type": "application/json" };
     if (key) headers["X-API-Key"] = key;
 
+    const idempotencyKey = crypto.randomUUID?.() || "inv-" + Date.now() + "-" + Math.random().toString(36).slice(2);
+    headers["Idempotency-Key"] = idempotencyKey;
     const response = await fetch(BASE_API_URL + "/incidents/investigate/stream", {
       method: "POST",
       headers,
@@ -594,6 +596,7 @@ async function startPipeline(payload) {
     let buffer = "";
     let currentEvent = null;
     let verdictResult = null;
+    let investigationResult = null;
 
     while (true) {
       const { done, value } = await reader.read();
@@ -617,6 +620,9 @@ async function startPipeline(payload) {
           try { data = JSON.parse(rawData); } catch (_e) { data = { message: rawData }; }
 
           switch (currentEvent) {
+            case "heartbeat":
+              log("pipeline still running · " + (data.elapsed_seconds || 0) + "s", "ls-dim");
+              break;
             case "pipeline_started":
               setStep(0);
               log(`pipeline started · request_id=${data.request_id || "ok"}`);
@@ -656,6 +662,10 @@ async function startPipeline(payload) {
               log(`failure pattern extracted & memory indexed`, "ls-warn");
               break;
             case "verdict":
+              verdictResult = data;
+              break;
+            case "investigation_result":
+              investigationResult = data;
               verdictResult = data;
               break;
             case "error":
