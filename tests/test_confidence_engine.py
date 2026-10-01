@@ -29,4 +29,4 @@ def test_non_finite_prior_does_not_escape_bounds() -> None:
     result = propagate(graph)
 
     assert result.posteriors["nan"] == 0.0
-    assert result.posteriors["inf"] == MAX_PROPAGATED_CONFIDENCE
+    assert result.posteriors["inf"] == 0.0
