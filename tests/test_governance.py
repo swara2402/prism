@@ -47,13 +47,14 @@ def test_health_is_minimal(client):
     r = client.get("/health")
     assert r.status_code == 200
     body = r.json()
-    assert body == {"status": "ok"}
+    assert body["status"] == "ok"
+    assert body["service"] == "WayPoint"
+    assert body["version"] == "2.0.0"
     assert "subsystems" not in body
 
 
-def test_internal_health_requires_auth(client):
-    # Override the client-level API key => unauthenticated request.
-    assert client.get("/internal/health", headers={"X-API-Key": ""}).status_code == 401
+def test_internal_health_requires_auth(client, anon_client):
+    assert anon_client.get("/internal/health", headers={"X-API-Key": ""}).status_code == 401
 
     good = client.get("/internal/health")
     assert good.status_code == 200
@@ -177,9 +178,9 @@ def test_redaction_scrubs_secrets_and_pii():
     assert "[REDACTED" in out
 
     provider_keys = [
-        "REDACTED-API-KEY-12345",
-        "REDACTED-PAT-67890",
-        "REDACTED-TOKEN-abcdef",
+        "REDACTED-API-KEY-123456789",
+        "REDACTED-PAT-678901234",
+        "REDACTED-TOKEN-abcdef123456789",
     ]
     for key in provider_keys:
         assert scrub(key) != key, f"leak: {key[:18]}..."
