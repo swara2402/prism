@@ -19,6 +19,8 @@ RUN pip install --upgrade pip && pip install -r requirements-runtime.txt \
 RUN useradd --create-home --shell /usr/sbin/nologin --uid 10001 appuser
 
 COPY --chown=appuser:appuser . .
+# Runtime data must remain writable while the source tree stays read-only.
+RUN mkdir -p /app/data/experiments && chown -R appuser:appuser /app/data
 
 USER appuser
 
