@@ -48,6 +48,12 @@ SCOPES_BY_ROLE: dict[str, list[str]] = {
 }
 
 
+class RegistrationRequest(BaseModel):
+    email: str = Field(min_length=3, max_length=320)
+    password: str = Field(min_length=12, max_length=256)
+    workspace_name: str = Field(min_length=2, max_length=128)
+
+
 class LoginRequest(BaseModel):
     email: str = Field(min_length=3, max_length=320)
     password: str = Field(min_length=1, max_length=256)
@@ -109,6 +115,63 @@ def _session_out(p) -> SessionOut:
             can_admin=p.can("admin"),
             can_manage_workspace=p.can("owner"),
         ),
+    )
+
+
+@router.post("/register", response_model=SessionOut, status_code=201)
+async def register(body: RegistrationRequest, request: Request, response: Response) -> SessionOut:
+    """Create a new workspace and its owner account."""
+    if "@" not in body.email:
+        raise HTTPException(422, "Enter a valid email address")
+    email = body.email.strip().lower()
+    workspace_name = " ".join(body.workspace_name.strip().split())
+    ip = request.client.host if request.client else "unknown"
+    allowed, retry = await _account_limiter.check(f"register:ip:{ip}")
+    if not allowed:
+        raise HTTPException(
+            429,
+            "Too many registration attempts. Try again shortly.",
+            headers={"Retry-After": str(max(1, int(retry + 0.999)))},
+        )
+
+    async with AsyncSessionLocal() as session:
+        existing = (
+            await session.execute(select(User).where(User.email == email))
+        ).scalars().first()
+        if existing is not None:
+            raise HTTPException(409, "An account with this email already exists")
+
+        tenant = Tenant(name=workspace_name)
+        session.add(tenant)
+        await session.flush()
+        user = User(
+            email=email,
+            password_hash=hash_password(body.password),
+            tenant_id=tenant.id,
+            role="owner",
+            is_active=True,
+        )
+        session.add(user)
+        try:
+            await session.commit()
+            await session.refresh(user)
+            await session.refresh(tenant)
+        except IntegrityError:
+            await session.rollback()
+            raise HTTPException(409, "An account with this email already exists")
+
+    token = create_access_token(user, tenant)
+    response.set_cookie(
+        COOKIE_NAME,
+        token,
+        httponly=True,
+        secure=settings.is_production,
+        samesite="strict",
+        max_age=SESSION_HOURS * 3600,
+        path="/",
+    )
+    return _session_out(
+        Principal(user.id, user.email, user.tenant_id, user.role, tenant.name)
     )
 
 
