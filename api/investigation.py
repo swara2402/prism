@@ -61,7 +61,7 @@ from database.repositories import (
 from explainability.engine import build_explanation
 from investigation.tree import run_tree
 from learning.continuous_learning import LearningInput, learn_from_incident
-from meta_reasoning.engine import evaluate as meta_evaluate
+from meta_reasoning.engine import evaluate as meta_evaluate, persist_result as persist_meta_reasoning
 from models.schemas import (
     AgentStatus,
     IncidentCreate,
@@ -622,7 +622,9 @@ async def _run_investigation(
         final_root_cause=consensus.root_cause,
         final_confidence=consensus.confidence,
         agents_used=agents_used,
+        persist=False,
     )
+    await persist_meta_reasoning(meta)
 
     # 11. Mark the investigation phase complete. Findings were already
     #     persisted by the orchestrator (with root_cause_hint provenance) so a
