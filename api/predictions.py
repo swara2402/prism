@@ -7,6 +7,7 @@ Endpoints for the Predictive Incident Engine.
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import math
 from typing import Dict, List, Optional, cast
 
 from fastapi import APIRouter, Depends, Query
@@ -44,17 +45,18 @@ async def run_predictions(
         topology_dependents=body.topology_dependents,
         tenant_id=tenant,
     )
+    now = datetime.now(timezone.utc)
     return [
         PredictionOut(
-            id="",
+            id=f"{p.service}:{p.predicted_failure_type}",
             service=p.service,
             predicted_failure_type=p.predicted_failure_type,
-            probability=p.probability,
+            probability=min(1.0, max(0.0, float(p.probability))) if math.isfinite(float(p.probability)) else 0.0,
             estimated_time_minutes=p.estimated_time_minutes,
             impact=p.impact,
             rationale=p.rationale,
-            created_at=cast(datetime, getattr(p, "created_at", None) or datetime.now(timezone.utc)),
-            updated_at=cast(datetime, getattr(p, "updated_at", None) or getattr(p, "created_at", None) or datetime.now(timezone.utc)),
+            created_at=cast(datetime, getattr(p, "created_at", None) or now),
+            updated_at=cast(datetime, getattr(p, "updated_at", None) or getattr(p, "created_at", None) or now),
         )
         for p in preds
     ]
