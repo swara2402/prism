@@ -316,6 +316,7 @@ async def test_incident_dedup_is_mutual(db_session):
         severity="P1",
         affected_services=["checkout-svc"],
         status="open",
+        tenant_id="test-tenant",
     )
     await db_session.flush()
     assert inc2.id == inc1.id
@@ -412,12 +413,13 @@ def test_consensus_discounts_correlated_fallback_voters():
             },
         }
 
-    single = _run_loop(reach_consensus([_find("A", 0.8)], reliability_scores={"A": 0.5}, min_voters=1))
+    single = _run_loop(reach_consensus([_find("A", 0.8)], reliability_scores={"A": 0.5}, min_voters=1, quorum_threshold=0.5))
     correlated = _run_loop(
         reach_consensus(
             [_find("A", 0.8), _find("B", 0.8)],
             reliability_scores={"A": 0.5, "B": 0.5},
             min_voters=1,
+            quorum_threshold=0.5,
         )
     )
     assert single.root_cause == "timeout"
