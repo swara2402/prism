@@ -328,6 +328,7 @@ async def test_incident_dedup_is_mutual(db_session):
         severity="P1",
         affected_services=["payments-svc"],
         status="open",
+        tenant_id="test-tenant",
     )
     await db_session.flush()
     assert inc3.id != inc1.id
