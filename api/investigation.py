@@ -560,9 +560,10 @@ async def _run_investigation(
     # looks this up with a natural-language hypothesis, so a label key made the
     # entire graph evidence channel unreachable.
     graph_candidates = {
-        str(candidate.get("node_id")): float(candidate.get("confidence") or 0.0)
+        key: float(candidate.get("confidence") or 0.0)
         for candidate in candidates
-        if candidate.get("node_id")
+        for key in (str(candidate.get("node_id") or ""), str(candidate.get("label") or "").strip().lower())
+        if key
     }
 
     # 7. Consensus engine
@@ -687,7 +688,7 @@ async def _run_investigation(
         duration_seconds=round(duration, 3),
         agent_statuses=[AgentStatus(**a) for a in agent_statuses],
         status="completed_with_degraded_agents" if failed else "completed",
-        runtime=_runtime_metadata(),
+        runtime=_runtime_metadata(principal_role),
     )
 
 
@@ -892,9 +893,10 @@ async def _stream_investigation(
     # up with a natural-language hypothesis, so a label key made the graph
     # evidence channel unreachable.
     graph_candidates = {
-        str(candidate.get("node_id")): float(candidate.get("confidence") or 0.0)
+        key: float(candidate.get("confidence") or 0.0)
         for candidate in candidates
-        if candidate.get("node_id")
+        for key in (str(candidate.get("node_id") or ""), str(candidate.get("label") or "").strip().lower())
+        if key
     }
 
     yield sse("confidence_propagated", {
