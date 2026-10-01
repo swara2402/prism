@@ -9,7 +9,7 @@ sqlalchemy==2.0.50
 asyncpg==0.31.0
 psycopg2-binary==2.9.12
 alembic==1.18.4
-PyJWT==2.13.0
+PyJWT==2.15.0
 neo4j==6.2.0
 networkx==3.6.1
 sentence-transformers==5.6.1
