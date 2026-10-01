@@ -10,10 +10,20 @@ def shannon_entropy(hypotheses: Dict[str, float]) -> float:
     """
     if not hypotheses:
         return 0.0
-    total = sum(hypotheses.values())
+    # Hypothesis weights must form a valid non-negative distribution.
+    # Negative/NaN/inf scores are invalid evidence, not probabilities.
+    clean = []
+    for raw in hypotheses.values():
+        try:
+            p = float(raw)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(p) and p > 0:
+            clean.append(p)
+    total = sum(clean)
     if total <= 0:
         return 0.0
-    probs = [p / total for p in hypotheses.values() if p > 0]
+    probs = [p / total for p in clean]
     num_h = len(probs)
     if num_h <= 1:
         return 0.0
