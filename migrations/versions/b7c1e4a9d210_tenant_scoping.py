@@ -61,12 +61,10 @@ def upgrade() -> None:
                 op.drop_index(index["name"], table_name=table)
 
     # 3. Re-establish uniqueness per tenant.
-    op.create_unique_constraint(
-        "_tenant_incident_idem_uc", "incidents", ["tenant_id", "idempotency_key"]
-    )
-    op.create_unique_constraint(
-        "_tenant_job_idem_uc", "investigation_jobs", ["tenant_id", "idempotency_key"]
-    )
+    with op.batch_alter_table("incidents") as batch_op:
+        batch_op.create_unique_constraint("_tenant_incident_idem_uc", ["tenant_id", "idempotency_key"])
+    with op.batch_alter_table("investigation_jobs") as batch_op:
+        batch_op.create_unique_constraint("_tenant_job_idem_uc", ["tenant_id", "idempotency_key"])
 
     # 4. Predictions were previously unique on (service, failure_type) globally;
     #    that is now per tenant.
@@ -75,15 +73,13 @@ def upgrade() -> None:
         cols = [c for c in (index.get("column_names") or []) if c]
         if index.get("unique") and set(cols) == {"service", "predicted_failure_type"}:
             op.drop_index(index["name"], table_name="predictions")
-    op.create_unique_constraint(
-        "_tenant_service_failure_uc",
-        "predictions",
-        ["tenant_id", "service", "predicted_failure_type"],
-    )
+    with op.batch_alter_table("predictions") as batch_op:
+        batch_op.create_unique_constraint("_tenant_service_failure_uc", ["tenant_id", "service", "predicted_failure_type"])
 
     # 5. Agent reliability was keyed by agent name alone, which is incompatible
     #    with per-tenant rows. Re-key it as (tenant_id, agent_name).
-    op.create_unique_constraint("_tenant_agent_uc", "agent_reliability", ["tenant_id", "agent_name"])
+    with op.batch_alter_table("agent_reliability") as batch_op:
+        batch_op.create_unique_constraint("_tenant_agent_uc", ["tenant_id", "agent_name"])
 
     # 6. ``users.email`` was globally unique, which let any workspace admin
     #    permanently claim an address and deny it to every other workspace.
@@ -92,15 +88,21 @@ def upgrade() -> None:
         cols = [c for c in (index.get("column_names") or []) if c]
         if index.get("unique") and cols == ["email"]:
             op.drop_index(index["name"], table_name="users")
-    op.create_unique_constraint("_tenant_email_uc", "users", ["tenant_id", "email"])
+    with op.batch_alter_table("users") as batch_op:
+        batch_op.create_unique_constraint("_tenant_email_uc", ["tenant_id", "email"])
 
 
 def downgrade() -> None:
-    op.drop_constraint("_tenant_email_uc", "users", type_="unique")
-    op.drop_constraint("_tenant_agent_uc", "agent_reliability", type_="unique")
-    op.drop_constraint("_tenant_service_failure_uc", "predictions", type_="unique")
-    op.drop_constraint("_tenant_job_idem_uc", "investigation_jobs", type_="unique")
-    op.drop_constraint("_tenant_incident_idem_uc", "incidents", type_="unique")
+    with op.batch_alter_table("users") as batch_op:
+        batch_op.drop_constraint("_tenant_email_uc", type_="unique")
+    with op.batch_alter_table("agent_reliability") as batch_op:
+        batch_op.drop_constraint("_tenant_agent_uc", type_="unique")
+    with op.batch_alter_table("predictions") as batch_op:
+        batch_op.drop_constraint("_tenant_service_failure_uc", type_="unique")
+    with op.batch_alter_table("investigation_jobs") as batch_op:
+        batch_op.drop_constraint("_tenant_job_idem_uc", type_="unique")
+    with op.batch_alter_table("incidents") as batch_op:
+        batch_op.drop_constraint("_tenant_incident_idem_uc", type_="unique")
 
     for table in ("predictions", "agent_reliability", "patterns"):
         op.drop_index(f"ix_{table}_tenant_id", table_name=table)
