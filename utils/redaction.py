@@ -70,6 +70,8 @@ _PATTERNS = [
     re.compile(r"\b(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{16,}\b"),
 ]
 
+_REDACTED_CREDENTIAL_RE = re.compile(r"(?i)\bREDACTED-(?:API[-_]?KEY|PAT|TOKEN)-[A-Za-z0-9._~+/=-]{5,}\b")
+
 _EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 _IPV4_RE = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
 _CREDIT_CARD_RE = re.compile(r"\b(?:\d[ -]*?){13,16}\b")
@@ -91,7 +93,7 @@ def scrub(text: str) -> str:
     """Return *text* with credentials / PII replaced by markers."""
     if not text:
         return text
-    out = text
+    out = _REDACTED_CREDENTIAL_RE.sub(_SECRET_MARKER, text)
     for pattern in _PATTERNS:
         out = pattern.sub(_SECRET_MARKER, out)
     out = _EMAIL_RE.sub(_EMAIL_MARKER, out)

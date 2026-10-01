@@ -1,14 +1,16 @@
 services:
   - type: web
-    name: prism
+    name: waypoint
     runtime: docker
-    plan: free
+    plan: starter
     region: singapore
     branch: main
-    autoDeploy: true
+    autoDeployTrigger: commit
     dockerfilePath: ./Dockerfile
+    preDeployCommand: alembic upgrade head
     dockerContext: .
-    healthCheckPath: /health
+    healthCheckPath: /ready
+    dockerCommand: python -c "import os,uvicorn; uvicorn.run('main:app',host='0.0.0.0',port=int(os.getenv('PORT','8000')))"
     envVars:
       - key: APP_ENV
         value: production
@@ -25,15 +27,17 @@ services:
       - key: PRISM_BOOTSTRAP_PASSWORD
         sync: false
       - key: PRISM_BOOTSTRAP_TENANT_NAME
-        value: PRISM Workspace
+        value: WayPoint Workspace
       - key: CORS_ORIGINS
         sync: false
       - key: DATABASE_URL
-        sync: false
+        fromDatabase:
+          name: waypoint-db
+          property: connectionString
       - key: DATABASE_SYNC_URL
-        sync: false
-      - key: NEO4J_PASSWORD
-        generateValue: true
+        fromDatabase:
+          name: waypoint-db
+          property: connectionString
       - key: ENABLE_NEO4J
         value: "false"
       - key: ENABLE_OLLAMA
@@ -41,13 +45,24 @@ services:
       - key: ENABLE_FAISS
         value: "false"
       - key: LEARNING_MODE
-        value: frozen
+        value: online
       - key: LEARNING_REQUIRE_CONFIRMATION
         value: "true"
       - key: REQUIRE_TENANT_HEADER
         value: "true"
       - key: MAX_CONCURRENT_INVESTIGATIONS
         value: "2"
+      - key: JOB_WORKER_ENABLED
+        value: "true"
+
+databases:
+  - name: waypoint-db
+    plan: basic-256mb
+    region: singapore
+    postgresMajorVersion: "16"
+    databaseName: waypoint
+    user: waypoint
+    diskSizeGB: 1
 
 previews:
   generation: off

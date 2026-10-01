@@ -122,6 +122,7 @@ class Settings(BaseSettings):
     max_pagination_limit: int = 100
     max_prediction_batch: int = 50
 
+    run_migrations_on_startup: bool = False
     job_worker_enabled: bool = False
     job_poll_interval: float = 1.0
     job_attempts_max: int = 3

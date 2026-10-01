@@ -23,7 +23,7 @@ env:
   ENABLE_NEO4J: "false"
   ENABLE_OLLAMA: "false"
   ENABLE_FAISS: "false"
-  LEARNING_MODE: frozen
+  LEARNING_MODE: online
   PYTHONUNBUFFERED: "1"
 
 jobs:

@@ -38,6 +38,11 @@ logger = get_logger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     logger.info("app_startup", extra={"env": settings.app_env, "host": settings.app_host, "port": settings.app_port})
+    if settings.is_production and settings.run_migrations_on_startup:
+        import subprocess
+        logger.info("production_migrations_starting")
+        subprocess.run(["alembic", "upgrade", "head"], check=True)
+        logger.info("production_migrations_complete")
     await init_db()
     await bootstrap_owner()
     KnowledgeGraphStore.get()
@@ -149,7 +154,7 @@ async def health() -> dict:
 @app.get("/internal/health", tags=["meta"])
 async def internal_health(_api_key: str = Depends(require_api_key)) -> dict:
     kg_store = KnowledgeGraphStore.get()
-    memory_store = MemoryStore.get(getattr(__import__("fastapi").Request, "state", None)) if False else MemoryStore.get()
+    memory_store = MemoryStore.get()
     return {"status": "ok", "env": settings.app_env, "version": "2.0.0", "service": "WayPoint", "memory_scope": "tenant-bound-lazy", "memory_size": memory_store.size(), "subsystems": {"database": "connected", "memory": "lazy", "faiss": "tenant-scoped-lazy" if settings.enable_faiss else "disabled", "neo4j": "connected" if getattr(kg_store, "_driver", None) else "fallback_mode"}}
 
 

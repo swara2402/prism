@@ -135,7 +135,7 @@ async def create_incident(session: AsyncSession, *, tenant_id: Optional[str] = N
     )
     if existing_incident:
         # If a similar incident exists, update it instead of creating a new one
-        await update_incident(session, existing_incident.id, **kwargs)
+        await update_incident(session, existing_incident.id, tenant_id=tenant_id, **kwargs)
         await session.refresh(existing_incident)
         return existing_incident
 

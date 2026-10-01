@@ -11,13 +11,18 @@ from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Path, Query
 from pydantic import BaseModel, Field
 
-from api.deps import require_api_key
+from api.deps import require_api_key, require_tenant
+from config.settings import settings
 from knowledge_graph.store import KnowledgeGraphStore
+
+def _require_backend() -> None:
+    if not settings.enable_neo4j:
+        raise HTTPException(503, "Knowledge graph is disabled in this deployment")
 
 router = APIRouter(
     prefix="/kg",
     tags=["knowledge_graph"],
-    dependencies=[Depends(require_api_key)],
+    dependencies=[Depends(require_api_key), Depends(require_tenant), Depends(_require_backend)],
 )
 
 

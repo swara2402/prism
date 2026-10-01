@@ -49,6 +49,7 @@ from config.settings import settings
 from database.repositories import (
     create_incident,
     get_incident,
+    get_incident_by_idempotency_key,
     get_resolution,
     get_root_cause,
     list_findings,

@@ -104,6 +104,9 @@ async def _update_pattern_library(
 
 
 async def _update_knowledge_graph(inp: LearningInput, rc: str) -> None:
+    if not settings.enable_neo4j:
+        logger.info("knowledge_graph_learning_skipped_disabled", extra={"incident_id": inp.incident_id})
+        return
     store = KnowledgeGraphStore.get()
     await store.update_after_investigation(
         incident_id=inp.incident_id,

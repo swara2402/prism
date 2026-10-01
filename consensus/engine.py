@@ -53,7 +53,7 @@ def _normalize(s: str) -> str:
 
 
 def _cluster_hints(
-    opinions: Sequence[VoterOpinion], similarity_threshold: float = 0.4
+    opinions: Sequence[VoterOpinion], similarity_threshold: float = 0.3
 ) -> List[Tuple[str, List[VoterOpinion]]]:
     clusters: List[Tuple[str, List[VoterOpinion], set[str]]] = []
     for op in opinions:
@@ -162,10 +162,19 @@ async def reach_consensus(
 
     winner_rep, winner_members, winner_score = winner
     if len(winner_members) < required_voters or winner_score < threshold:
+        alternatives = [
+            AlternativeHypothesis(
+                cause=rep,
+                confidence=round(score, 3),
+                evidence=[f"{m.voter} (support={m.confidence:.2f}, rel={m.reliability:.2f})" for m in members],
+                voters=[m.voter for m in members],
+            )
+            for rep, members, score in cluster_scores[1:]
+        ]
         return ConsensusResult(
             root_cause="undetermined",
             confidence=round(winner_score, 3),
-            alternatives=[],
+            alternatives=alternatives,
             explanation=(
                 f"No consensus: required {required_voters} independent voter(s) "
                 f"and support score >= {threshold:.2f}; received {len(winner_members)} "
