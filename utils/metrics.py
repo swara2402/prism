@@ -63,6 +63,10 @@ class MovingAverage:
     initialized: bool = False
 
     def update(self, sample: float) -> float:
+        import math
+        sample = float(sample)
+        if not math.isfinite(sample):
+            return self.value
         if not self.initialized:
             self.value = sample
             self.initialized = True
@@ -80,8 +84,8 @@ class StatsTracker:
     samples: int = 0
 
     def record(self, latency_s: float, confidence: float) -> None:
-        self.latency.update(latency_s)
-        self.confidence.update(confidence)
+        self.latency.update(max(0.0, float(latency_s)))
+        self.confidence.update(max(0.0, min(1.0, float(confidence))))
         self.samples += 1
 
 
@@ -90,8 +94,13 @@ def harmonic_mean(values: List[float]) -> float:
     if not values:
         return 0.0
     total = 0.0
+    import math
     for v in values:
-        if v <= 0:
+        try:
+            v = float(v)
+        except (TypeError, ValueError):
+            return 0.0
+        if not math.isfinite(v) or v <= 0:
             return 0.0
         total += 1.0 / v
     return len(values) / total
