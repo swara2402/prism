@@ -263,7 +263,14 @@ async def orchestrate(
         persist_tasks: List[Any] = []
         for f in findings:
             persist_tasks.append(_persist_finding(incident_id, f))
-            persist_tasks.append(_update_agent_invocation(f.agent_name, f.latency_s, f.confidence))
+            persist_tasks.append(
+                _update_agent_invocation(
+                    f.agent_name,
+                    f.latency_s,
+                    f.confidence,
+                    context.get("tenant_id"),
+                )
+            )
         await asyncio.gather(*persist_tasks, return_exceptions=True)
 
     duration = time.perf_counter() - start
