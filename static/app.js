@@ -1512,6 +1512,29 @@ async function loadKg() {
 async function buildKg() {
   const services = kgServices?.get() || [];
   if (!services.length) { toast("Add at least one service to build a subgraph.", { type: "warn" }); return; }
+
+  // Knowledge Graph is an optional capability. Never surface its disabled
+  // backend response as a generic page/query failure.
+  try {
+    const health = await api("/internal/health");
+    if (health?.subsystems?.neo4j !== "connected") {
+      const canvas = $("#kg-canvas");
+      const empty = $("#kg-empty");
+      canvas?.classList.add("hidden");
+      empty?.classList.remove("hidden");
+      if (empty) {
+        empty.innerHTML = emptyState(
+          "Knowledge Graph is unavailable",
+          "Neo4j is disabled in this deployment. The rest of WayPoint remains fully usable.",
+        );
+      }
+      return;
+    }
+  } catch (_e) {
+    // If health cannot be checked, let the request below report the actual
+    // backend state rather than failing the whole page.
+  }
+
   const canvas = $("#kg-canvas");
   const empty = $("#kg-empty");
   canvas.classList.remove("hidden");
@@ -1523,6 +1546,13 @@ async function buildKg() {
   } catch (err) {
     empty.classList.remove("hidden");
     canvas.classList.add("hidden");
+    if (err?.status === 503) {
+      empty.innerHTML = emptyState(
+        "Knowledge Graph is unavailable",
+        "Neo4j is disabled in this deployment. The rest of WayPoint remains fully usable.",
+      );
+      return;
+    }
     toast(err.message, { type: "error", title: "Subgraph query failed" });
   }
 }
