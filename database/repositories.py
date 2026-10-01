@@ -97,12 +97,17 @@ async def get_similar_incident(
     if not affected_services:
         return None
 
-    conditions = and_(
-        or_(*[dbm.Incident.affected_services.contains([svc]) for svc in affected_services]),
-        dbm.Incident.tenant_id == tenant_id,
-    )
+    # affected_services is a dialect-aware JSON/JSONB TypeDecorator.
+    # Its generic SQLAlchemy comparator implements contains as string LIKE,
+    # which PostgreSQL rejects when the bound value is JSONB. Keep the
+    # service-overlap check in Python after a bounded, tenant-scoped query.
+    # This preserves correctness on both PostgreSQL and SQLite without relying
+    # on a dialect-specific comparator.
     res = await session.execute(
-        select(dbm.Incident).where(conditions).order_by(dbm.Incident.created_at.desc())
+        select(dbm.Incident)
+        .where(dbm.Incident.tenant_id == tenant_id)
+        .order_by(dbm.Incident.created_at.desc())
+        .limit(500)
     )
     candidates: Sequence[dbm.Incident] = res.scalars().all()
 
