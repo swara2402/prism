@@ -166,7 +166,9 @@ def _install_auth_overrides(app, *, role: str = "owner", tenant_id: str = TEST_T
 
     principal = _test_principal(role=role, tenant_id=tenant_id)
 
-    async def _fake_api_key():
+    async def _fake_api_key(request):
+        request.state.principal = principal
+        request.state.tenant_id = principal.tenant_id
         return principal.user_id
 
     async def _fake_tenant():
