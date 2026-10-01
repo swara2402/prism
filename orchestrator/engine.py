@@ -76,8 +76,6 @@ def _attach_provenance(payload: FindingPayload) -> None:
 async def _persist_finding(incident_id: str, payload: FindingPayload) -> None:
     """Persist a finding to PostgreSQL (best-effort)."""
     try:
-        if not tenant_id:
-            raise ValueError("Agent invocation telemetry requires an explicit tenant_id")
         from database.session import AsyncSessionLocal
 
         async with AsyncSessionLocal() as session:
@@ -163,6 +161,8 @@ async def _update_agent_invocation(agent_name: str, latency: float, confidence: 
     output.  Trusted confidence_avg is only updated when grading against
     confirmed ground truth (learning.continuous_learning).
     """
+    if not tenant_id:
+        raise ValueError("Agent invocation telemetry requires an explicit tenant_id")
     try:
         from database.session import AsyncSessionLocal
         import datetime as _dt
