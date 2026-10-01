@@ -12,6 +12,7 @@ from __future__ import annotations
 from typing import Any, Dict, List
 
 from agents.base import BaseAgent, FindingPayload
+from config.settings import settings
 
 
 class KnowledgeGraphAnalyzerAgent(BaseAgent):
@@ -34,7 +35,19 @@ class KnowledgeGraphAnalyzerAgent(BaseAgent):
                 evidence={},
             )
 
-        # Lazy import so the agent can run even if Neo4j driver is missing
+        # Do not silently use the process-global in-memory fallback in a
+        # multi-tenant production deployment. Until the KG backend is explicitly
+        # enabled and tenant-namespaced, report a degraded signal instead.
+        if not settings.enable_neo4j:
+            return FindingPayload(
+                agent_name=self.name,
+                finding_type="degraded",
+                description="Knowledge graph is disabled in this deployment; no cross-tenant fallback graph is consulted.",
+                confidence=0.0,
+                evidence={"backend": "disabled"},
+                metadata={"provenance": {"source_type": "system", "codepath": self.name, "status": "disabled"}},
+            )
+        # Lazy import so the agent can run even if Neo4j driver is missing.
         try:
             from knowledge_graph.store import KnowledgeGraphStore
 
