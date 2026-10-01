@@ -21,8 +21,8 @@ jobs:
         run: |
           docker run -d --name prism-smoke \
             -e APP_ENV=test \
-            -e DATABASE_URL=sqlite+aiosqlite:///./prism-container.db \
-            -e DATABASE_SYNC_URL=sqlite:///./prism-container.db \
+            -e DATABASE_URL=sqlite+aiosqlite:////tmp/prism-container.db \
+            -e DATABASE_SYNC_URL=sqlite:////tmp/prism-container.db \
             -e ENABLE_NEO4J=false \
             -e ENABLE_OLLAMA=false \
             -e ENABLE_FAISS=false \
