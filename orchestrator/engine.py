@@ -76,6 +76,8 @@ def _attach_provenance(payload: FindingPayload) -> None:
 async def _persist_finding(incident_id: str, payload: FindingPayload) -> None:
     """Persist a finding to PostgreSQL (best-effort)."""
     try:
+        if not tenant_id:
+            raise ValueError("Agent invocation telemetry requires an explicit tenant_id")
         from database.session import AsyncSessionLocal
 
         async with AsyncSessionLocal() as session:
@@ -154,7 +156,7 @@ def _fallback_used(payload: FindingPayload) -> bool:
     return bool(meta.get("fallback_used"))
 
 
-async def _update_agent_invocation(agent_name: str, latency: float, confidence: float) -> None:
+async def _update_agent_invocation(agent_name: str, latency: float, confidence: float, tenant_id: Optional[str]) -> None:
     """Track invocation telemetry (count, last run, observed latency) for an agent.
 
     Confidence is deliberately NOT written here: it is unverified model
@@ -169,6 +171,7 @@ async def _update_agent_invocation(agent_name: str, latency: float, confidence: 
             ar = await upsert_agent_reliability(
                 session,
                 agent_name,
+                tenant_id=tenant_id,
                 latency_avg=latency,
             )
             # Ensure the row has a stable identity before mutating it
@@ -200,7 +203,7 @@ async def execute_action(
     if persist:
         await asyncio.gather(
             _persist_finding(incident_id, finding),
-            _update_agent_invocation(finding.agent_name, finding.latency_s, finding.confidence),
+            _update_agent_invocation(finding.agent_name, finding.latency_s, finding.confidence, context.get("tenant_id")),
             return_exceptions=True,
         )
 
