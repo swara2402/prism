@@ -366,11 +366,14 @@ async def run_tree(
         # Execute ONE best action
         try:
             rel = best_action.get("reliability_score", 0.5)
-            finding_payload = await execute_action(
-                agent_name=target_agent,
-                context=context,
-                incident_id=incident_id,
-                reliability=rel,
+            finding_payload = await asyncio.wait_for(
+                execute_action(
+                    agent_name=target_agent,
+                    context=context,
+                    incident_id=incident_id,
+                    reliability=rel,
+                ),
+                timeout=max(1.0, float(settings.agent_timeout_seconds)),
             )
             finding_dict = finding_payload.to_dict()
             status = "success"
