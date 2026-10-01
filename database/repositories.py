@@ -718,12 +718,14 @@ async def update_job(
     session: AsyncSession,
     job_id: str,
     *,
+    tenant_id: Optional[str],
     status: str,
     result_incident_id: Optional[str] = None,
     error: Optional[str] = None,
     progress: Optional[float] = None,
     next_attempt_at: Optional[Any] = None,
 ) -> None:
+    tenant_id = _require_tenant(tenant_id, "update_job")
     values: dict[str, Any] = {"status": status}
     if result_incident_id is not None:
         values["result_incident_id"] = result_incident_id
@@ -734,7 +736,12 @@ async def update_job(
     if next_attempt_at is not None:
         values["next_attempt_at"] = next_attempt_at
     await session.execute(
-        update(dbm.InvestigationJob).where(dbm.InvestigationJob.id == job_id).values(**values)
+        update(dbm.InvestigationJob)
+        .where(
+            dbm.InvestigationJob.id == job_id,
+            dbm.InvestigationJob.tenant_id == tenant_id,
+        )
+        .values(**values)
     )
 
 
