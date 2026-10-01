@@ -1479,60 +1479,75 @@ function inspectKgNode(nd) {
   `;
 }
 
+function renderFallbackKg(incidents, selectedServices) {
+  const services = [...new Set(selectedServices.map(s => String(s).trim()).filter(Boolean))];
+  const nodes = [];
+  const edges = [];
+  const seen = new Set();
+
+  const addNode = (id, label, key, props = {}) => {
+    if (seen.has(id)) return;
+    seen.add(id);
+    nodes.push({ id, label, key, props });
+  };
+
+  services.forEach(s => addNode("svc:" + s, "service", s, { source: "incident history" }));
+  (incidents || []).forEach((inc) => {
+    const affected = (inc.affected_services || []).filter(s => services.includes(s));
+    if (!affected.length) return;
+    const iid = "inc:" + inc.id;
+    addNode(iid, "incident", trunc(inc.title || inc.id, 28), {
+      severity: inc.severity || "—",
+      status: inc.status || "—",
+    });
+    affected.forEach(s => edges.push({ source: "svc:" + s, target: iid, rel: "AFFECTED_BY", weight: 1 }));
+    for (let i = 0; i < affected.length; i++) {
+      for (let j = i + 1; j < affected.length; j++) {
+        edges.push({ source: "svc:" + affected[i], target: "svc:" + affected[j], rel: "CO_OCCURS", weight: 0.55 });
+      }
+    }
+  });
+
+  renderKG({
+    nodes,
+    edges,
+    meta: { source: "postgres_incident_history", fallback: true },
+  });
+
+  const meta = $("#pred-meta");
+  void meta;
+  const stage = $("#kg-stage");
+  if (stage) {
+    const note = document.createElement("div");
+    note.className = "kg-fallback-note";
+    note.textContent = "Incident topology · derived from stored WayPoint incident history";
+    stage.prepend(note);
+  }
+}
+
 async function loadKg() {
   if (state.kgLoaded) return;
   state.kgLoaded = true;
+  const services = kgServices?.get() || [];
 
-  // Neo4j is intentionally disabled on the current managed deployment.
-  // Treat that as a product capability state, not a page failure.
   try {
     const health = await api("/internal/health");
-    const enabled = health?.subsystems?.neo4j === "connected";
-    if (!enabled) {
-      const empty = $("#kg-empty");
-      const canvas = $("#kg-canvas");
-      canvas?.classList.add("hidden");
-      empty?.classList.remove("hidden");
-      if (empty) {
-        empty.innerHTML = emptyState(
-          "Knowledge Graph is unavailable",
-          "Neo4j is disabled in this deployment. The rest of WayPoint remains fully usable.",
-        );
-      }
+    if (health?.subsystems?.neo4j === "connected") {
+      if (services.length) await buildKg();
       return;
     }
   } catch (_e) {
-    // The graph is optional. Keep the page usable even when its health check
-    // is unavailable.
+    // Fall through to the database-backed demo graph.
   }
 
-  if (kgServices?.get().length) await buildKg();
+  if (services.length) await buildKg();
 }
 
 async function buildKg() {
   const services = kgServices?.get() || [];
-  if (!services.length) { toast("Add at least one service to build a subgraph.", { type: "warn" }); return; }
-
-  // Knowledge Graph is an optional capability. Never surface its disabled
-  // backend response as a generic page/query failure.
-  try {
-    const health = await api("/internal/health");
-    if (health?.subsystems?.neo4j !== "connected") {
-      const canvas = $("#kg-canvas");
-      const empty = $("#kg-empty");
-      canvas?.classList.add("hidden");
-      empty?.classList.remove("hidden");
-      if (empty) {
-        empty.innerHTML = emptyState(
-          "Knowledge Graph is unavailable",
-          "Neo4j is disabled in this deployment. The rest of WayPoint remains fully usable.",
-        );
-      }
-      return;
-    }
-  } catch (_e) {
-    // If health cannot be checked, let the request below report the actual
-    // backend state rather than failing the whole page.
+  if (!services.length) {
+    toast("Add at least one service to build a subgraph.", { type: "warn" });
+    return;
   }
 
   const canvas = $("#kg-canvas");
@@ -1540,20 +1555,33 @@ async function buildKg() {
   canvas.classList.remove("hidden");
   empty.classList.add("hidden");
   $("#kg-svg").innerHTML = "";
+
   try {
-    const data = await api("/kg/services/subgraph", { method: "POST", body: { services } });
-    renderKG(data);
+    const health = await api("/internal/health");
+    if (health?.subsystems?.neo4j === "connected") {
+      const data = await api("/kg/services/subgraph", { method: "POST", body: { services } });
+      renderKG(data);
+      return;
+    }
+  } catch (_e) {
+    // Use the real incident-history fallback below.
+  }
+
+  try {
+    const incidents = await api("/incidents?limit=50");
+    renderFallbackKg(incidents, services);
+    if (!incidents.some(i => (i.affected_services || []).some(s => services.includes(s)))) {
+      empty.classList.remove("hidden");
+      canvas.classList.add("hidden");
+      empty.innerHTML = emptyState(
+        "No incident relationships yet",
+        "Run an investigation involving one of the selected services and the topology will appear here.",
+      );
+    }
   } catch (err) {
     empty.classList.remove("hidden");
     canvas.classList.add("hidden");
-    if (err?.status === 503) {
-      empty.innerHTML = emptyState(
-        "Knowledge Graph is unavailable",
-        "Neo4j is disabled in this deployment. The rest of WayPoint remains fully usable.",
-      );
-      return;
-    }
-    toast(err.message, { type: "error", title: "Subgraph query failed" });
+    toast(err.message, { type: "error", title: "Topology load failed" });
   }
 }
 
