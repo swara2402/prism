@@ -156,24 +156,34 @@ async def predict(
         if len(timestamps) < 1:
             continue
 
-        # Frequency-based base probability
+        # Estimate a probability for the next 24 hours from an empirical
+        # recurrence rate. Time since the last incident alone is NOT a
+        # probability: the old implementation reached 100% merely because
+        # enough time elapsed, even when the historical sample was tiny.
         sorted_ts = sorted(timestamps)
         intervals_min: List[float] = []
         for i in range(1, len(sorted_ts)):
             delta = (sorted_ts[i] - sorted_ts[i - 1]).total_seconds() / 60.0
-            intervals_min.append(delta)
+            if delta > 0:
+                intervals_min.append(delta)
 
-        avg_interval = statistics.fmean(intervals_min) if intervals_min else (60 * 24 * 30)  # 30d default
+        if len(sorted_ts) >= 2:
+            observed_span = max(1.0, (sorted_ts[-1] - sorted_ts[0]).total_seconds() / 60.0)
+            event_rate_per_min = (len(sorted_ts) - 1) / observed_span
+            avg_interval = statistics.fmean(intervals_min)
+        else:
+            # One observation is insufficient to infer a recurrence rate.
+            event_rate_per_min = 0.0
+            avg_interval = 60 * 24 * 30
+
         last_incident = sorted_ts[-1]
-        time_since_last_min = (now - last_incident).total_seconds() / 60.0
+        time_since_last_min = max(0.0, (now - last_incident).total_seconds() / 60.0)
+        horizon_min = 24 * 60
+        base_p = 1.0 - pow(2.718281828, -event_rate_per_min * horizon_min)
 
-        # Base probability: how close are we to the average recurrence interval?
-        ratio = time_since_last_min / max(1.0, avg_interval)
-        base_p = min(1.0, max(0.0, ratio))
-
-        # Trend slope on intervals (negative = more frequent = higher risk)
+        # Trend slope on intervals (negative = more frequent = higher risk).
         slope = _trend_slope(intervals_min) if len(intervals_min) >= 2 else 0.0
-        trend_boost = max(0.0, min(0.3, -slope / max(1.0, abs(avg_interval)) * 100.0))
+        trend_boost = max(0.0, min(0.2, -slope / max(1.0, abs(avg_interval)) * 10.0))
 
         # Recent anomaly boost
         anomaly_values = recent_anomalies.get(svc, [])
@@ -200,6 +210,7 @@ async def predict(
             f"{len(timestamps)} historical {ftype} incident(s) on '{svc}'.",
             f"Average recurrence interval = {avg_interval:.0f} min.",
             f"Time since last = {time_since_last_min:.0f} min.",
+            "Base risk horizon = next 24 hours.",
             f"Trend slope = {slope:.4f} (negative = increasing frequency).",
         ]
         if anomaly_boost > 0:
@@ -218,6 +229,8 @@ async def predict(
                 "incident_count": len(timestamps),
                 "avg_interval_minutes": round(avg_interval, 1),
                 "time_since_last_minutes": round(time_since_last_min, 1),
+                "prediction_horizon_minutes": horizon_min,
+                "event_rate_per_minute": round(event_rate_per_min, 8),
                 "trend_slope": round(slope, 4),
                 "anomaly_boost": round(anomaly_boost, 3),
                 "topology_dependents": deps,
