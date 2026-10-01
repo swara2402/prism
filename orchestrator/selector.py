@@ -51,16 +51,16 @@ def _evidence_keys(context: Dict[str, Any]) -> Dict[str, bool]:
     }
 
 
-async def _load_reliability(agent_names: Sequence[str]) -> Dict[str, float]:
-    """Load reliability scores from the JSON reliability store; defaults applied if missing.
-    The async DB path has been removed for simplicity and to avoid unnecessary dependencies.
-    """
-    from investigation.reliability_store import get_reliability
-    out: Dict[str, float] = {}
-    for name in agent_names:
-        out[name] = get_reliability("default", name)
-    return out
-
+async def _load_reliability(agent_names: Sequence[str], tenant_id: Optional[str]) -> Dict[str, float]:
+    """Load tenant-authoritative reliability from PostgreSQL."""
+    from database.session import AsyncSessionLocal
+    from database.repositories import list_agent_reliabilities
+    if not tenant_id:
+        raise ValueError("Agent selection requires an explicit tenant_id")
+    async with AsyncSessionLocal() as session:
+        rows = await list_agent_reliabilities(session, tenant_id=tenant_id)
+    by_name = {row.agent_name: float(row.reliability_score) for row in rows}
+    return {name: max(0.0, min(1.0, by_name.get(name, settings.agent_default_reliability))) for name in agent_names}
 
 
 async def select_agents(
@@ -97,7 +97,8 @@ async def select_agents(
 
     all_agents = instantiate_all()
     evidence = _evidence_keys(context)
-    reliability = await _load_reliability(list(all_agents.keys()))
+    tenant_id = context.get("tenant_id")
+    reliability = await _load_reliability(list(all_agents.keys()), tenant_id)
 
     selected: List[BaseAgent] = []
     skipped: List[Tuple[str, str]] = []
@@ -177,32 +178,9 @@ async def select_agents(
         )
 
 
-    # ----- Classic selection gates on instantiated agents -----
-    for name, agent in all_agents.items():
-        if name in skip_agents:
-            skipped.append((name, "explicitly skipped"))
-            continue
-        if name in already_executed:
-            # Check if repeatable
-            cap_match = next((c for c in AGENT_REGISTRY if c.agent_name == name), None)
-            if cap_match and not cap_match.repeatable:
-                continue
-        if name in force_agents:
-            selected.append(agent)
-            continue
-        if not agent.supports(incident_type):
-            skipped.append((name, f"unsupported incident_type={incident_type!r}"))
-            continue
-        missing = [r for r in agent.requires if not evidence.get(r)]
-        if missing:
-            skipped.append((name, f"missing evidence: {missing}"))
-            continue
-        rel = reliability.get(name, settings.agent_default_reliability)
-        if rel < min_rel:
-            skipped.append((name, f"low reliability ({rel:.2f} < {min_rel:.2f})"))
-            continue
-        selected.append(agent)
-
+    # MDV is the canonical selector. The selected list is a compatibility
+    # view only. The adaptive tree executes exactly one top-ranked action.
+    selected = [all_agents[a["agent_name"]] for a in raw_actions if a["agent_name"] in all_agents]
     selected.sort(key=lambda a: a.priority)
 
     # Normalize execution cost to [0, 1]
