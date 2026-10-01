@@ -181,6 +181,11 @@ async def readiness() -> Response:
     return JSONResponse(status_code=200 if all(checks.values()) else 503, content=payload)
 
 
+@app.get("/register", include_in_schema=False)
+async def register_page() -> FileResponse:
+    return FileResponse(STATIC_DIR / "register.html")
+
+
 @app.get("/login", include_in_schema=False)
 async def login_page() -> FileResponse:
     return FileResponse(STATIC_DIR / "login.html")
