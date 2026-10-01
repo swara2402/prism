@@ -979,7 +979,9 @@ async def _stream_investigation(
         final_root_cause=consensus.root_cause,
         final_confidence=consensus.confidence,
         agents_used=agents_used,
+        persist=False,
     )
+    await persist_meta_reasoning(meta)
 
     # 11. Mark the investigation phase complete; "analyzed" closes the
     #     deduplication window that a lingering "investigating" kept open.
