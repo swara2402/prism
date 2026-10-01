@@ -56,6 +56,12 @@ def test_health_is_minimal(client):
 def test_internal_health_requires_auth(client, anon_client):
     assert anon_client.get("/internal/health", headers={"X-API-Key": ""}).status_code == 401
 
+    # anon_client clears the shared app overrides while it is constructed.
+    # Restore the authenticated test principal before exercising client.
+    from main import app
+    from tests.conftest import _install_auth_overrides
+
+    _install_auth_overrides(app)
     good = client.get("/internal/health")
     assert good.status_code == 200
     body = good.json()
