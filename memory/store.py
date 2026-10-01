@@ -149,7 +149,7 @@ class MemoryStore:
             incident = await session.get(dbm.Incident, incident_id)
             if incident is None or incident.tenant_id != effective_tenant:
                 raise ValueError("Incident does not belong to the requested tenant")
-            rec = await add_memory(session, incident_id=incident_id, text_repr=text_repr, embedding=list(embedding), root_cause=root_cause, resolution=resolution, confidence=max(0.0, min(1.0, confidence)), lessons=list(lessons), services=list(services))
+            rec = await add_memory(session, tenant_id=effective_tenant, incident_id=incident_id, text_repr=text_repr, embedding=list(embedding), root_cause=root_cause, resolution=resolution, confidence=max(0.0, min(1.0, confidence)), lessons=list(lessons), services=list(services))
             await session.commit()
             mem_id = rec.id
 
