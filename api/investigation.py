@@ -1099,29 +1099,49 @@ async def investigate_stream(
                     yield f"event: investigation_result\\ndata: {json.dumps(result.model_dump())}\\n\\n"
                     return
 
-            async def collect_pipeline():
-                chunks = []
-                async for chunk in _stream_investigation(
-                    incident_in,
-                    request_id=request_id,
-                    idempotency_key=idem_key,
-                    tenant_id=tenant,
-                    principal_role=role,
-                ):
-                    chunks.append(chunk)
-                return chunks
+            # Bridge the pipeline generator through an async queue so
+            # individual stage events reach the client immediately while
+            # heartbeats keep the connection alive during quiet periods.
+            queue: asyncio.Queue = asyncio.Queue()
+            sentinel = object()
 
-            pipeline_task = asyncio.create_task(collect_pipeline())
-            elapsed = 0.0
-            while not pipeline_task.done():
-                await asyncio.sleep(10.0)
-                if pipeline_task.done():
-                    break
-                elapsed += 10.0
-                yield f"event: heartbeat\\ndata: {json.dumps({'stage': 'pipeline_running', 'elapsed_seconds': elapsed, 'request_id': request_id})}\\n\\n"
+            async def produce_pipeline():
+                try:
+                    async for chunk in _stream_investigation(
+                        incident_in,
+                        request_id=request_id,
+                        idempotency_key=idem_key,
+                        tenant_id=tenant,
+                        principal_role=role,
+                    ):
+                        await queue.put(("chunk", chunk))
+                except Exception as exc:
+                    await queue.put(("error", exc))
+                finally:
+                    await queue.put(("done", sentinel))
 
-            for chunk in await pipeline_task:
-                yield chunk
+            pipeline_task = asyncio.create_task(produce_pipeline())
+            try:
+                elapsed = 0.0
+                while True:
+                    try:
+                        kind, value = await asyncio.wait_for(queue.get(), timeout=10.0)
+                    except asyncio.TimeoutError:
+                        elapsed += 10.0
+                        yield f"event: heartbeat\\ndata: {json.dumps({'stage': 'pipeline_running', 'elapsed_seconds': elapsed, 'request_id': request_id})}\\n\\n"
+                        continue
+
+                    if kind == "chunk":
+                        yield value
+                    elif kind == "error":
+                        raise value
+                    else:
+                        break
+            finally:
+                if not pipeline_task.done():
+                    pipeline_task.cancel()
+                await asyncio.gather(pipeline_task, return_exceptions=True)
+
         except HTTPException as exc:
             yield f"event: error\\ndata: {json.dumps({'error': exc.detail})}\\n\\n"
         except Exception as exc:
