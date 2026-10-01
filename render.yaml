@@ -7,6 +7,7 @@ services:
     branch: main
     autoDeployTrigger: commit
     dockerfilePath: ./Dockerfile
+    preDeployCommand: alembic upgrade head
     dockerContext: .
     healthCheckPath: /ready
     dockerCommand: python -c "import os,uvicorn; uvicorn.run('main:app',host='0.0.0.0',port=int(os.getenv('PORT','8000')))"
@@ -15,8 +16,6 @@ services:
         value: production
       - key: APP_LOG_LEVEL
         value: INFO
-      - key: RUN_MIGRATIONS_ON_STARTUP
-        value: "true"
       - key: API_KEY
         generateValue: true
       - key: PRISM_JWT_SECRET
