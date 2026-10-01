@@ -59,7 +59,7 @@ def test_memory_stats(client):
 def test_kg_subgraph(client):
     r = client.post("/kg/services/subgraph", json={"services": ["x"]})
     assert r.status_code == 503
-    assert "Neo4j" in r.json()["detail"]
+    assert "disabled" in r.json()["detail"].lower()
 
 
 def test_investigate_full_pipeline(client):
