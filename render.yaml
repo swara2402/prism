@@ -54,6 +54,10 @@ services:
         value: "2"
       - key: JOB_WORKER_ENABLED
         value: "true"
+      # Safety net for fresh databases if the platform skips a pre-deploy hook.
+      # Alembic remains the only production schema authority.
+      - key: RUN_MIGRATIONS_ON_STARTUP
+        value: "true"
 
 databases:
   - name: waypoint-db
