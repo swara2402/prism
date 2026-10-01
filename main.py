@@ -183,7 +183,9 @@ async def readiness() -> Response:
 
 @app.get("/register", include_in_schema=False)
 async def register_page() -> FileResponse:
-    return FileResponse(STATIC_DIR / "register.html")
+    # Registration uses the same auth shell as login; the page switches to
+    # workspace-creation mode based on the /register path.
+    return FileResponse(STATIC_DIR / "login.html")
 
 
 @app.get("/login", include_in_schema=False)
