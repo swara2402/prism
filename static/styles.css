@@ -1943,3 +1943,264 @@ a, .link, .nav-accent {
 @media (max-width: 700px) {
   .topbar { backdrop-filter: blur(14px); }
 }
+
+
+/* ============================================================
+   WayPoint COMMAND CENTER UI v4
+   Stronger visual identity, hierarchy and live-state language.
+   ============================================================ */
+.ui-v2 {
+  --wp-radius: 18px;
+}
+.ui-v2 .main {
+  background:
+    linear-gradient(rgba(255,255,255,.018) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255,255,255,.014) 1px, transparent 1px);
+  background-size: 56px 56px;
+  background-position: -1px -1px;
+}
+.ui-v2 .content {
+  max-width: 1500px;
+  padding: 32px clamp(20px, 3vw, 48px) 60px;
+}
+.ui-v2 .topbar {
+  height: 76px;
+  padding-inline: clamp(20px, 3vw, 44px);
+  backdrop-filter: blur(20px) saturate(130%);
+}
+.ui-v2 .view-title {
+  font-size: 15px;
+  letter-spacing: .01em;
+}
+.ui-v2 .view-sub {
+  opacity: .58;
+}
+.ui-v2 .sidebar {
+  width: 250px;
+  padding: 24px 14px 18px;
+}
+.ui-v2 .brand {
+  padding: 6px 10px 28px;
+}
+.ui-v2 .brand-mark {
+  width: 42px;
+  height: 42px;
+  border-radius: 13px;
+  background: linear-gradient(145deg,#7C5CFF,#3D2B9C);
+}
+.ui-v2 .brand-name {
+  letter-spacing: .12em;
+}
+.ui-v2 .nav {
+  gap: 6px;
+}
+.ui-v2 .nav-item {
+  min-height: 46px;
+  border-radius: 12px;
+  padding-inline: 14px;
+  transition: transform .18s ease, background .18s ease, color .18s ease;
+}
+.ui-v2 .nav-item:hover {
+  transform: translateX(3px);
+  background: rgba(124,92,255,.07);
+}
+.ui-v2 .nav-item.active {
+  background: linear-gradient(100deg, rgba(124,92,255,.20), rgba(124,92,255,.045));
+  border: 1px solid rgba(124,92,255,.16);
+}
+.ui-v2 .demo-hero {
+  min-height: 270px;
+  padding: clamp(30px,4vw,54px);
+  border-radius: 26px;
+  position: relative;
+  overflow: hidden;
+  isolation: isolate;
+}
+.ui-v2 .demo-hero::after {
+  content: "";
+  position: absolute;
+  width: 360px;
+  height: 360px;
+  right: -110px;
+  top: -150px;
+  border: 1px solid rgba(50,214,232,.16);
+  border-radius: 50%;
+  box-shadow: 0 0 0 42px rgba(50,214,232,.025), 0 0 0 86px rgba(124,92,255,.025);
+  pointer-events: none;
+}
+.ui-v2 .ui-hero-copy {
+  max-width: 760px;
+}
+.ui-v2 .ui-hero-copy h2 {
+  font-size: clamp(32px, 4.2vw, 58px);
+  line-height: .99;
+  letter-spacing: -.045em;
+  max-width: 760px;
+  margin: 14px 0 18px;
+}
+.ui-v2 .ui-hero-copy p {
+  max-width: 650px;
+  font-size: 15px;
+  line-height: 1.75;
+  color: #AAB4C4;
+}
+.ui-v2 .demo-actions {
+  position: relative;
+  z-index: 2;
+  margin-top: 28px;
+}
+.ui-v2 .btn {
+  border-radius: 12px;
+  min-height: 44px;
+  padding-inline: 17px;
+}
+.ui-v2 .ui-section-intro {
+  margin-top: 42px;
+  margin-bottom: 16px;
+}
+.ui-v2 .ui-section-intro h3 {
+  margin-top: 7px;
+  font-size: 23px;
+  letter-spacing: -.025em;
+}
+.ui-v2 .hint {
+  color: #7F8A9D;
+}
+.ui-v2 .ui-command-stats {
+  gap: 12px;
+}
+.ui-v2 .ui-command-stats .stat-card {
+  min-height: 128px;
+  border-radius: 16px;
+  position: relative;
+  overflow: hidden;
+  box-shadow: 0 18px 55px rgba(0,0,0,.16);
+}
+.ui-v2 .ui-command-stats .stat-card::after {
+  content:"";
+  position:absolute;
+  inset:auto -20% -65% 30%;
+  height:120px;
+  background: radial-gradient(circle, rgba(124,92,255,.12), transparent 65%);
+}
+.ui-v2 .ui-overview-grid {
+  gap: 16px;
+  margin-top: 16px;
+}
+.ui-v2 .panel {
+  border-radius: var(--wp-radius);
+  box-shadow: 0 18px 60px rgba(0,0,0,.15);
+}
+.ui-v2 .panel-head {
+  padding: 20px 22px;
+}
+.ui-v2 .table-wrap,
+.ui-v2 .ui-intelligence-panel > div:last-child {
+  padding-inline: 8px;
+}
+.ui-v2 .ui-flow-strip {
+  margin-top: 16px;
+  padding: 20px 24px;
+  border: 1px solid #242D3D;
+  border-radius: 18px;
+  background: rgba(16,21,33,.72);
+  backdrop-filter: blur(16px);
+}
+.ui-v2 .ui-flow-step b {
+  font-size: 13px;
+}
+.ui-v2 .ui-flow-step small {
+  color: #707C90;
+}
+.ui-v2 .form-panel,
+.ui-v2 .run-panel {
+  border-radius: 22px;
+}
+.ui-v2 .demo-callout {
+  border: 1px solid rgba(124,92,255,.20);
+  background: linear-gradient(100deg, rgba(124,92,255,.09), rgba(50,214,232,.025));
+  border-radius: 15px;
+}
+.ui-v2 .scenario-presets {
+  padding: 14px 0 20px;
+}
+.ui-v2 .preset-pill {
+  border-radius: 999px;
+  border-color: #2A3447;
+  background: rgba(255,255,255,.025);
+}
+.ui-v2 .preset-pill:hover,
+.ui-v2 .preset-pill.active {
+  border-color: rgba(124,92,255,.65);
+  background: rgba(124,92,255,.11);
+  color: #F4F7FB;
+}
+.ui-v2 .field input,
+.ui-v2 .field select,
+.ui-v2 .field textarea,
+.ui-v2 .search,
+.ui-v2 .memory-search {
+  border-radius: 12px;
+  border-color: #293346;
+  background: #0B1019;
+}
+.ui-v2 .field input:focus,
+.ui-v2 .field select:focus,
+.ui-v2 .field textarea:focus {
+  border-color: rgba(124,92,255,.75);
+  box-shadow: 0 0 0 3px rgba(124,92,255,.10);
+}
+.ui-v2 .run-head {
+  padding: 24px 26px;
+  border-bottom: 1px solid #242D3D;
+}
+.ui-v2 .run-title {
+  font-size: 20px;
+  letter-spacing: -.02em;
+}
+.ui-v2 .pipeline li {
+  border-radius: 10px;
+  margin-bottom: 5px;
+}
+.ui-v2 .pipeline li.active {
+  border-color: rgba(124,92,255,.22);
+  box-shadow: inset 3px 0 0 #7C5CFF;
+}
+.ui-v2 .log-stream {
+  border-radius: 14px;
+  background: #070A10;
+  box-shadow: inset 0 0 40px rgba(124,92,255,.025);
+}
+.ui-v2 .verdict {
+  border-radius: 20px;
+  border-color: rgba(124,92,255,.24);
+  background: linear-gradient(145deg, rgba(21,28,43,.98), rgba(12,16,25,.98));
+}
+.ui-v2 .toolbar {
+  margin-bottom: 16px;
+}
+.ui-v2 .toolbar .search {
+  min-height: 44px;
+}
+.ui-v2 .memory-hero {
+  padding: 30px;
+  background:
+    radial-gradient(500px 180px at 0 0, rgba(124,92,255,.12), transparent 70%),
+    linear-gradient(145deg,#151C2B,#101521);
+}
+.ui-v2 .agent-grid {
+  gap: 14px;
+}
+.ui-v2 .agent-card {
+  border-radius: 16px;
+  border-color: #242D3D;
+  background: linear-gradient(145deg,#151C2B,#101521);
+}
+.ui-v2 .toast {
+  border-radius: 12px;
+  backdrop-filter: blur(14px);
+}
+@media (max-width: 850px) {
+  .ui-v2 .sidebar { width: 235px; }
+  .ui-v2 .ui-hero-copy h2 { font-size: 36px; }
+}
