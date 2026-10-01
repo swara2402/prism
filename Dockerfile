@@ -27,4 +27,7 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
     CMD ["python", "-c", "import os, socket; s=socket.create_connection(('127.0.0.1', int(os.getenv('PORT', '8000'))), 4); s.close()"]
 
-CMD ["python", "-c", "import os, uvicorn; uvicorn.run('main:app', host='0.0.0.0', port=int(os.getenv('PORT', '8000')))"]
+# Render's existing service configuration is not guaranteed to apply the
+# Blueprint preDeployCommand. Run Alembic before the web process so a fresh
+# managed Postgres can never reach bootstrap_owner() without its schema.
+CMD ["sh", "-c", "alembic upgrade head && exec python -c \"import os,uvicorn; uvicorn.run('main:app',host='0.0.0.0',port=int(os.getenv('PORT','8000')))\""]
