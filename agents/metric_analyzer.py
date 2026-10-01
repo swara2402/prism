@@ -43,8 +43,14 @@ class MetricAnalyzerAgent(BaseAgent):
             stdev = statistics.pstdev(nums) or 1e-9
             last = nums[-1]
             z = abs(last - mean) / stdev
-            prev_avg = statistics.fmean(nums[:-3]) if len(nums) >= 4 else mean
-            change_pct = ((last - prev_avg) / (abs(prev_avg) or 1e-9)) * 100
+            # Compare the latest observation with the preceding window,
+            # not with a baseline that includes the current point.
+            baseline = nums[:-1]
+            prev_avg = statistics.fmean(baseline) if baseline else mean
+            if abs(prev_avg) < 1e-9:
+                change_pct = 0.0 if abs(last) < 1e-9 else float("inf")
+            else:
+                change_pct = ((last - prev_avg) / abs(prev_avg)) * 100
 
             severity = min(1.0, z / 4.0)  # z>=4 => 1.0
 
