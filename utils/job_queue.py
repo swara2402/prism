@@ -94,6 +94,7 @@ class LocalWorker:
                 return None
             await session.commit()
             job_id = job.id
+            tenant_id = job.tenant_id
             attempts = job.attempts or 0
             payload = dict(job.payload or {})
             job_attempts_max = job.attempts_max or self.attempts_max
@@ -101,13 +102,14 @@ class LocalWorker:
         start = datetime.now(timezone.utc)
         try:
             async with session_local() as session:
-                await update_job(session, job_id, status="running", progress=0.5)
+                await update_job(session, job_id, tenant_id=tenant_id, status="running", progress=0.5)
                 await session.commit()
             incident_id = await self._runner(payload)
             async with session_local() as session:
                 await update_job(
                     session,
                     job_id,
+                    tenant_id=tenant_id,
                     status="completed",
                     result_incident_id=incident_id,
                     progress=1.0,
@@ -120,7 +122,7 @@ class LocalWorker:
             return job_id
         except asyncio.CancelledError:
             async with session_local() as session:
-                await update_job(session, job_id, status="queued")
+                await update_job(session, job_id, tenant_id=tenant_id, status="queued")
                 await session.commit()
             raise
         except Exception as exc:  # noqa: BLE001 — job failures are recorded, not raised
@@ -137,6 +139,7 @@ class LocalWorker:
                 await update_job(
                     session,
                     job_id,
+                    tenant_id=tenant_id,
                     status=status,
                     error=error,
                     next_attempt_at=next_attempt,
