@@ -16,6 +16,7 @@ from pathlib import Path
 
 import pytest
 import pytest_asyncio
+from fastapi import Request
 
 # Make sure project root is on sys.path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -166,7 +167,7 @@ def _install_auth_overrides(app, *, role: str = "owner", tenant_id: str = TEST_T
 
     principal = _test_principal(role=role, tenant_id=tenant_id)
 
-    async def _fake_api_key(request):
+    async def _fake_api_key(request: Request):
         request.state.principal = principal
         request.state.tenant_id = principal.tenant_id
         return principal.user_id
