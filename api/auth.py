@@ -21,6 +21,7 @@ from auth.security import (
     hash_password,
     principal_from_request,
     revoke_jti,
+    Principal,
 )
 from config.settings import settings
 from database.auth_models import ServiceAccount, Tenant, User
