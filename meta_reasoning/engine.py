@@ -145,34 +145,31 @@ def evaluate(
     )
 
     if persist:
-        import asyncio
-
-        async def _persist() -> None:
-            try:
-                from database.session import AsyncSessionLocal
-
-                async with AsyncSessionLocal() as session:
-                    await save_meta_reasoning(
-                        session,
-                        incident_id=incident_id,
-                        useful_agents=useful,
-                        unnecessary_agents=unnecessary,
-                        optimal_path=optimal_path,
-                        suggestions=suggestions,
-                        agent_scores=scores,
-                    )
-                    await session.commit()
-            except Exception as exc:
-                logger.warning("meta_reasoning_persist_failed error=%r", exc)
-
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            asyncio.run(_persist())
-        else:
-            if loop.is_running():
-                asyncio.ensure_future(_persist())
-            else:
-                loop.run_until_complete(_persist())
+        # This function may be executed in a worker thread for CPU-bound
+        # reasoning. Database sessions must never be created on a different
+        # event loop from the application's async engine. Callers that run
+        # evaluate() in a thread should persist the returned result from their
+        # owning async loop via persist_result().
+        logger.warning("meta_reasoning_persist_requested_without_async_context", extra={"incident_id": incident_id})
 
     return result
+
+
+async def persist_result(result: MetaReasoningResult) -> None:
+    """Persist a meta-reasoning result on the caller's owning async loop."""
+    try:
+        from database.session import AsyncSessionLocal
+
+        async with AsyncSessionLocal() as session:
+            await save_meta_reasoning(
+                session,
+                incident_id=result.incident_id,
+                useful_agents=result.useful_agents,
+                unnecessary_agents=result.unnecessary_agents,
+                optimal_path=result.optimal_path,
+                suggestions=result.suggestions,
+                agent_scores=result.agent_scores,
+            )
+            await session.commit()
+    except Exception as exc:
+        logger.warning("meta_reasoning_persist_failed error=%r", exc)
