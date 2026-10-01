@@ -154,7 +154,7 @@ async def health() -> dict:
 @app.get("/internal/health", tags=["meta"])
 async def internal_health(_api_key: str = Depends(require_api_key)) -> dict:
     kg_store = KnowledgeGraphStore.get()
-    memory_store = MemoryStore.get(getattr(__import__("fastapi").Request, "state", None)) if False else MemoryStore.get()
+    memory_store = MemoryStore.get()
     return {"status": "ok", "env": settings.app_env, "version": "2.0.0", "service": "WayPoint", "memory_scope": "tenant-bound-lazy", "memory_size": memory_store.size(), "subsystems": {"database": "connected", "memory": "lazy", "faiss": "tenant-scoped-lazy" if settings.enable_faiss else "disabled", "neo4j": "connected" if getattr(kg_store, "_driver", None) else "fallback_mode"}}
 
 
