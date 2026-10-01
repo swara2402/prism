@@ -1748,10 +1748,10 @@ select option { background: var(--surface-2); color: var(--text); }
   gap:12px;
 }
 .ui-v2 .ui-primary-panel,.ui-v2 .ui-intelligence-panel{min-width:0}
-.ui-v2 .ui-intelligence-panel .agent-row{
+.ui-v2 .ui-intelligence-panel .agent-bar-row{
   transition:background .16s ease;
 }
-.ui-v2 .ui-intelligence-panel .agent-row:hover{
+.ui-v2 .ui-intelligence-panel .agent-bar-row:hover{
   background:rgba(255,255,255,.025);
 }
 .ui-v2 .ui-flow-strip{
