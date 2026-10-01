@@ -615,11 +615,12 @@ async def get_job_by_idempotency_key(
         return None
     tenant_id = _require_tenant(tenant_id, "get_job_by_idempotency_key")
     res = await session.execute(
-        select(dbm.InvestigationJob).where(dbm.InvestigationJob.idempotency_key == key)
+        select(dbm.InvestigationJob).where(
+            dbm.InvestigationJob.idempotency_key == key,
+            dbm.InvestigationJob.tenant_id == tenant_id,
+        )
     )
     job = res.scalars().first()
-    if job is None or job.tenant_id != tenant_id:
-        return None
     return job
 
 
