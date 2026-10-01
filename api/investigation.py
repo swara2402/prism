@@ -691,6 +691,22 @@ async def _run_investigation(
     )
 
 
+async def _mark_investigation_failed(incident_id: Optional[str], tenant_id: str, error: Exception) -> None:
+    """Move a persisted investigation to a terminal failed state after pipeline error."""
+    if not incident_id:
+        return
+    try:
+        from database.session import AsyncSessionLocal
+        async with AsyncSessionLocal() as session:
+            await update_incident(session, incident_id, tenant_id=tenant_id, status="failed")
+            await session.commit()
+    except Exception as persist_exc:
+        logger.error(
+            "investigation_failure_status_persist_failed",
+            extra={"incident_id": incident_id, "error_type": type(error).__name__, "persist_error": repr(persist_exc)},
+        )
+
+
 async def _result_for_existing_incident(
     incident_id: str,
     *,
@@ -1079,6 +1095,7 @@ async def investigate_stream(
     await _acquire_investigation_slot(request)
 
     async def event_generator():
+        incident_id: Optional[str] = None
         try:
             # Idempotency replay: return the already-persisted result as the
             # final SSE event without re-running any agents.
@@ -1091,6 +1108,7 @@ async def investigate_stream(
                         session, idem_key, tenant_id=tenant
                     )
                     existing_id = existing.id if existing is not None else None
+                    incident_id = existing_id
                 if existing_id is not None:
                     yield f"event: idempotent_replay\\ndata: {json.dumps({'incident_id': existing_id, 'detail': 'Investigation previously run under this Idempotency-Key.'})}\\n\\n"
                     result = await _result_for_existing_incident(
@@ -1143,8 +1161,10 @@ async def investigate_stream(
                 await asyncio.gather(pipeline_task, return_exceptions=True)
 
         except HTTPException as exc:
+            await _mark_investigation_failed(incident_id, tenant, exc)
             yield f"event: error\\ndata: {json.dumps({'error': exc.detail})}\\n\\n"
         except Exception as exc:
+            await _mark_investigation_failed(incident_id, tenant, exc)
             logger.exception(
                 "investigation_stream_failed",
                 extra={"request_id": request_id, "error_type": type(exc).__name__, "error": repr(exc)},
