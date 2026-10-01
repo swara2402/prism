@@ -137,7 +137,19 @@ async def reach_consensus(
 
         codepaths = {m.codepath for m in independent}
         quorum_bonus = min(0.2, 0.05 * max(0, len(codepaths) - 1))
-        graph_bonus = 0.15 * max(0.0, min(1.0, (graph_candidates or {}).get(rep, 0.0)))
+        # Graph labels are display text and may differ only by case/spacing from
+        # an agent hint. Normalize the lookup so graph evidence actually
+        # participates in consensus when the semantics match.
+        graph_scores = graph_candidates or {}
+        graph_score = float(graph_scores.get(rep, 0.0))
+        if graph_score == 0.0:
+            normalized_rep = _normalize(rep)
+            graph_score = max(
+                (float(score) for label, score in graph_scores.items()
+                 if _normalize(str(label)) == normalized_rep),
+                default=0.0,
+            )
+        graph_bonus = 0.15 * max(0.0, min(1.0, graph_score))
         score = min(1.0, total + quorum_bonus + graph_bonus)
         cluster_scores.append((rep, independent, score))
 
@@ -193,8 +205,9 @@ async def reach_consensus(
         for rep, members, score in cluster_scores[1:]
     ]
 
+    voter_breakdown = breakdown()
     for op in opinions:
-        breakdown()[op.voter]["voted_for_winner"] = op in winner_members
+        voter_breakdown[op.voter]["voted_for_winner"] = op in winner_members
 
     explanation = (
         f"Consensus candidate '{winner_rep}' reached quorum with {len(winner_members)} "
@@ -206,5 +219,5 @@ async def reach_consensus(
         confidence=round(winner_score, 3),
         alternatives=alternatives,
         explanation=explanation,
-        voter_breakdown=breakdown(),
+        voter_breakdown=voter_breakdown,
     )
