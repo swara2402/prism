@@ -1092,32 +1092,47 @@ async def investigate_stream(
                     )
                     existing_id = existing.id if existing is not None else None
                 if existing_id is not None:
-                    yield f"event: idempotent_replay\ndata: {json.dumps({'incident_id': existing_id, 'detail': 'Investigation previously run under this Idempotency-Key.'})}\n\n"
+                    yield f"event: idempotent_replay\\ndata: {json.dumps({'incident_id': existing_id, 'detail': 'Investigation previously run under this Idempotency-Key.'})}\\n\\n"
                     result = await _result_for_existing_incident(
                         existing_id, tenant_id=tenant, reused=True, principal_role=role
                     )
-                    yield f"event: investigation_result\ndata: {json.dumps(result.model_dump())}\n\n"
+                    yield f"event: investigation_result\\ndata: {json.dumps(result.model_dump())}\\n\\n"
                     return
 
-            async for chunk in _stream_investigation(
-                incident_in,
-                request_id=request_id,
-                idempotency_key=idem_key,
-                tenant_id=tenant,
-                principal_role=role,
-            ):
+            async def collect_pipeline():
+                chunks = []
+                async for chunk in _stream_investigation(
+                    incident_in,
+                    request_id=request_id,
+                    idempotency_key=idem_key,
+                    tenant_id=tenant,
+                    principal_role=role,
+                ):
+                    chunks.append(chunk)
+                return chunks
+
+            pipeline_task = asyncio.create_task(collect_pipeline())
+            elapsed = 0.0
+            while not pipeline_task.done():
+                await asyncio.sleep(10.0)
+                if pipeline_task.done():
+                    break
+                elapsed += 10.0
+                yield f"event: heartbeat\\ndata: {json.dumps({'stage': 'pipeline_running', 'elapsed_seconds': elapsed, 'request_id': request_id})}\\n\\n"
+
+            for chunk in await pipeline_task:
                 yield chunk
         except HTTPException as exc:
-            # Raised once streaming has begun: report as an SSE error frame
-            # rather than tearing the connection down without explanation.
-            yield f"event: error\ndata: {json.dumps({'error': exc.detail})}\n\n"
-        except Exception:
+            yield f"event: error\\ndata: {json.dumps({'error': exc.detail})}\\n\\n"
+        except Exception as exc:
             logger.exception(
-                "investigation_stream_failed", extra={"request_id": request_id}
+                "investigation_stream_failed",
+                extra={"request_id": request_id, "error_type": type(exc).__name__, "error": repr(exc)},
             )
-            yield 'event: error\ndata: {"error": "Investigation failed"}\n\n'
+            yield f"event: error\\ndata: {json.dumps({'error': 'Investigation failed', 'request_id': request_id})}\\n\\n"
         finally:
             _investigation_semaphore.release()
+
 
     return StreamingResponse(
         event_generator(),
