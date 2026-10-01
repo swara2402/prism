@@ -431,9 +431,11 @@ async def list_approved_patterns(
 async def list_pending_patterns(
     session: AsyncSession, *, tenant_id: Optional[str] = None, limit: int = 500
 ) -> Sequence[dbm.Pattern]:
-    stmt = select(dbm.Pattern).where(dbm.Pattern.approved.is_(False))
-    if tenant_id is not None:
-        stmt = stmt.where(dbm.Pattern.tenant_id == tenant_id)
+    tenant_id = _require_tenant(tenant_id, "list_pending_patterns")
+    stmt = select(dbm.Pattern).where(
+        dbm.Pattern.approved.is_(False),
+        dbm.Pattern.tenant_id == tenant_id,
+    )
     res = await session.execute(stmt.limit(limit))
     return res.scalars().all()
 
