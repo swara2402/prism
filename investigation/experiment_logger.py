@@ -24,7 +24,7 @@ _LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 def _log_path(incident_id: str) -> Path:
     """Return the Path to the JSONL log file for *incident_id*."""
-    return _LOG_DIR / f"{incident_id}.jsonl"
+    return _log_dir() / f"{incident_id}.jsonl"
 
 
 def log_iteration(info: Dict[str, Any]) -> None:
