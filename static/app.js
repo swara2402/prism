@@ -1482,7 +1482,31 @@ function inspectKgNode(nd) {
 async function loadKg() {
   if (state.kgLoaded) return;
   state.kgLoaded = true;
-  if (kgServices?.get().length) buildKg();
+
+  // Neo4j is intentionally disabled on the current managed deployment.
+  // Treat that as a product capability state, not a page failure.
+  try {
+    const health = await api("/internal/health");
+    const enabled = health?.subsystems?.neo4j === "connected";
+    if (!enabled) {
+      const empty = $("#kg-empty");
+      const canvas = $("#kg-canvas");
+      canvas?.classList.add("hidden");
+      empty?.classList.remove("hidden");
+      if (empty) {
+        empty.innerHTML = emptyState(
+          "Knowledge Graph is unavailable",
+          "Neo4j is disabled in this deployment. The rest of WayPoint remains fully usable.",
+        );
+      }
+      return;
+    }
+  } catch (_e) {
+    // The graph is optional. Keep the page usable even when its health check
+    // is unavailable.
+  }
+
+  if (kgServices?.get().length) await buildKg();
 }
 
 async function buildKg() {
