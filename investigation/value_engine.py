@@ -130,12 +130,21 @@ def compute_mdv(
     w = weights or DEFAULT_MDV_WEIGHTS
     w.validate()
 
-    disc = max(0.0, min(1.0, float(action.get("discrimination_score", 0.0))))
-    unc_red = max(0.0, min(1.0, float(action.get("expected_uncertainty_reduction", 0.0))))
+    import math
+
+    def _unit(value: Any) -> float:
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            return 0.0
+        return max(0.0, min(1.0, value)) if math.isfinite(value) else 0.0
+
+    disc = _unit(action.get("discrimination_score", 0.0))
+    unc_red = _unit(action.get("expected_uncertainty_reduction", 0.0))
 
     # Evidence value: check action evidence_value key, state evidence_present, or supported_evidence
     if "evidence_value" in action:
-        evidence_val = float(action["evidence_value"])
+        evidence_val = _unit(action["evidence_value"])
     else:
         supported = action.get("supported_evidence", [])
         if state is not None and hasattr(state, "metadata") and isinstance(state.metadata, dict):
@@ -150,21 +159,21 @@ def compute_mdv(
             # Compute coverage ratio of required evidence present
             present = sum(1 for ev in supported if evidence_map.get(ev, False))
             evidence_val = present / len(supported) if supported else 0.0
-    evidence_val = max(0.0, min(1.0, evidence_val))
+    evidence_val = _unit(evidence_val)
 
     # Reliability score: prefer action dict score, then state metadata, then default 0.5
     agent_name = action.get("agent_name", "")
     if "reliability_score" in action:
-        rel_score = float(action["reliability_score"])
+        rel_score = _unit(action["reliability_score"])
     elif state is not None and hasattr(state, "metadata") and isinstance(state.metadata, dict):
         rel_map = state.metadata.get("reliability_scores", {})
-        rel_score = float(rel_map.get(agent_name, 0.5))
+        rel_score = _unit(rel_map.get(agent_name, 0.5))
     else:
         rel_score = 0.5
-    rel_score = max(0.0, min(1.0, rel_score))
+    rel_score = _unit(rel_score)
 
     # Execution cost: always normalized to [0, 1]
-    cost = max(0.0, min(1.0, float(action.get("execution_cost", 0.0))))
+    cost = _unit(action.get("execution_cost", 0.0))
 
     if disc <= 0.01 and unc_red <= 0.01:
         # Degenerate case: no discrimination or uncertainty reduction available.
