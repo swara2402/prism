@@ -49,7 +49,8 @@ def _bounded_confidence(value: float) -> float:
     if value != value:  # NaN
         return 0.0
     if value in (float("inf"), float("-inf")):
-        return MAX_PROPAGATED_CONFIDENCE if value > 0 else 0.0
+        # Infinity is invalid input, not evidence of certainty.
+        return 0.0
     return max(0.0, min(MAX_PROPAGATED_CONFIDENCE, float(value)))
 
 
