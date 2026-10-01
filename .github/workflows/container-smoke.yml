@@ -19,7 +19,7 @@ jobs:
         run: docker build --pull -t prism-ci .
       - name: Start container
         run: |
-          docker run -d --rm --name prism-smoke \
+          docker run -d --name prism-smoke \
             -e APP_ENV=test \
             -e DATABASE_URL=sqlite+aiosqlite:///./prism-container.db \
             -e DATABASE_SYNC_URL=sqlite:///./prism-container.db \
@@ -32,7 +32,7 @@ jobs:
             prism-ci
       - name: Check health endpoint
         run: |
-          trap 'docker logs prism-smoke || true; docker stop prism-smoke || true' EXIT
+          trap 'docker inspect prism-smoke || true; docker logs prism-smoke || true; docker rm -f prism-smoke || true' EXIT
           for i in {1..30}; do
             if curl -fsS http://127.0.0.1:18000/health; then exit 0; fi
             sleep 2
