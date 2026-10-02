@@ -83,7 +83,6 @@
       wrap.innerHTML = `<span class="prism-session-copy"><b>${esc(user.email || "User")}</b><small>${esc(tenant.name || "Workspace")} · ${esc(user.role || "viewer")}</small></span><button class="icon-btn" id="prism-logout" type="button" title="Sign out" aria-label="Sign out">↪</button>`;
       actions.prepend(wrap);
       const settings = document.querySelector("#btn-settings");
-      if (settings) settings.style.display = "none";
       document.querySelector("#prism-logout")?.addEventListener("click", async () => {
         try { await nativeFetch("/auth/logout", { method: "POST", credentials: "same-origin" }); }
         finally { window.location.replace("/login"); }
