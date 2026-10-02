@@ -4,6 +4,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+from datetime import datetime, timezone
 from typing import Any
 
 from cryptography.fernet import Fernet, InvalidToken
@@ -68,6 +69,8 @@ class SchemaMappingIn(BaseModel):
 
 class SchemaMappingOut(BaseModel):
     mapping: dict[str, str]
+    confirmed: bool = False
+    confirmed_at: datetime | None = None
 
 
 class IngestRequest(BaseModel):
@@ -171,7 +174,11 @@ async def get_schema_mapping(
     tenant: str = Depends(require_tenant),
 ) -> SchemaMappingOut:
     cfg = await _get_config(tenant)
-    return SchemaMappingOut(mapping=cfg.schema_mapping or {})
+    return SchemaMappingOut(
+        mapping=cfg.schema_mapping or {},
+        confirmed=bool(cfg.schema_mapping_confirmed_at),
+        confirmed_at=cfg.schema_mapping_confirmed_at,
+    )
 
 
 @router.put("/schema-mapping", response_model=SchemaMappingOut)
@@ -188,8 +195,13 @@ async def set_schema_mapping(
             cfg = WorkspaceConfig(tenant_id=tenant)
             session.add(cfg)
         cfg.schema_mapping = body.mapping
+        cfg.schema_mapping_confirmed_at = datetime.now(timezone.utc)
         await session.commit()
-    return SchemaMappingOut(mapping=body.mapping)
+    return SchemaMappingOut(
+        mapping=body.mapping,
+        confirmed=True,
+        confirmed_at=cfg.schema_mapping_confirmed_at,
+    )
 
 
 @router.post("/ingest", response_model=IngestOut, status_code=201)
