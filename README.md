@@ -313,12 +313,12 @@ http://localhost:8000/
 ```
 
 It uses the same origin as the API by default. If you deploy the console
-separately from the API, define `window.WAYPOINT_API_URL` **before** loading
+separately from the API, define `window.PRISM_API_URL` **before** loading
 `static/app.js`, e.g.:
 
 ```html
 <script>
-  window.WAYPOINT_API_URL = "https://api.example.com";
+  window.PRISM_API_URL = "https://api.example.com";
 </script>
 <script src="/static/app.js"></script>
 ```
