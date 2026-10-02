@@ -1,6 +1,6 @@
-# PRISM — Technical Architecture
+# WayPoint — Technical Architecture
 
-Deep developer documentation for **PRISM**, the Enterprise Agentic AI Incident
+Deep developer documentation for **WayPoint**, the Enterprise Agentic AI Incident
 Investigation Framework.
 
 This document assumes the application is installed and running. For
@@ -22,7 +22,7 @@ installation and setup, see [`README.md`](../README.md).
 10. [Resilience & Degradation](#resilience--degradation)
 11. [Security Model](#security-model)
 12. [Testing Strategy](#testing-strategy)
-13. [Extending PRISM](#extending-prism)
+13. [Extending WayPoint](#extending-prism)
 14. [Configuration Reference](#configuration-reference)
 15. [Performance Notes](#performance-notes)
 
@@ -844,7 +844,7 @@ environment to keep runs independent.
 
 ---
 
-## Extending PRISM
+## Extending WayPoint
 
 See [`docs/DEVELOPMENT.md`](./DEVELOPMENT.md). Highlights:
 
