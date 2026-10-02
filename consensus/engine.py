@@ -183,7 +183,11 @@ async def reach_consensus(
         return ConsensusResult("undetermined", 0.0, [], "No candidate hypothesis was produced.", breakdown())
 
     winner_rep, winner_members, winner_score = winner
-    if len(winner_members) < required_voters or winner_score < threshold:
+    # Quorum must use the same independent-voter set used for scoring.
+    # Otherwise duplicate/correlated findings can satisfy quorum after being
+    # collapsed for the support calculation.
+    winner_independent = _independent_members(winner_members)
+    if len(winner_independent) < required_voters or winner_score < threshold:
         alternatives = [
             AlternativeHypothesis(
                 cause=rep,
@@ -199,8 +203,9 @@ async def reach_consensus(
             alternatives=alternatives,
             explanation=(
                 f"No consensus: required {required_voters} independent voter(s) "
-                f"and support score >= {threshold:.2f}; received {len(winner_members)} "
-                f"voter(s) with support score {winner_score:.3f}."
+                f"and support score >= {threshold:.2f}; received {len(winner_independent)} "
+                f"independent voter(s) from {len(winner_members)} finding(s) "
+                f"with support score {winner_score:.3f}."
             ),
             voter_breakdown=breakdown(),
         )
@@ -220,7 +225,7 @@ async def reach_consensus(
         voter_breakdown[op.voter]["voted_for_winner"] = op in winner_members
 
     explanation = (
-        f"Consensus candidate '{winner_rep}' reached quorum with {len(winner_members)} "
+        f"Consensus candidate '{winner_rep}' reached quorum with {len(winner_independent)} "
         f"independent voter(s). Support score={winner_score:.3f}. "
         "This score is heuristic support, not a calibrated probability."
     )
