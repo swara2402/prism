@@ -22,7 +22,7 @@ router = APIRouter(prefix="/service", tags=["service"])
 
 
 def _fernet() -> Fernet:
-    seed = settings.signing_secret.encode("utf-8")
+    seed = (settings.llm_credential_secret or settings.signing_secret).encode("utf-8")
     key = base64.urlsafe_b64encode(hashlib.sha256(seed).digest())
     return Fernet(key)
 
@@ -181,7 +181,8 @@ async def ingest(
 ) -> IngestOut:
     """Accept customer-shaped data, normalize it, persist it, optionally investigate."""
     cfg = await _get_config(tenant)
-    normalized, inferred = normalize_evidence(body.data, cfg.schema_mapping or body.mapping)
+    merged_mapping = {**(cfg.schema_mapping or {}), **(body.mapping or {})}
+    normalized, inferred = normalize_evidence(body.data, merged_mapping)
     if body.mapping:
         inferred = {**inferred, **body.mapping}
 
@@ -229,6 +230,25 @@ async def ingest(
         investigation=investigation,
     )
 
+
+@router.post("/llm/test")
+async def test_llm_connection(
+    request: Request,
+    _auth: str = Depends(require_api_key),
+    tenant: str = Depends(require_tenant),
+) -> dict[str, Any]:
+    _require_admin(request)
+    cfg = await _get_config(tenant)
+    from utils.llm import LLMClient
+    client = LLMClient(
+        host=cfg.llm_base_url,
+        model=cfg.llm_model,
+        provider=cfg.llm_provider,
+        api_key=_decrypt(cfg.llm_api_key_encrypted),
+        timeout=10.0,
+    )
+    ok = await client.test_connection()
+    return {"ok": ok, "provider": cfg.llm_provider, "model": cfg.llm_model}
 
 @router.post("/schema-mapping/infer", response_model=SchemaMappingOut)
 async def infer_schema_mapping(
