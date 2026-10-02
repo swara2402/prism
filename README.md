@@ -1,9 +1,9 @@
-# PRISM — Enterprise Agentic AI Incident Investigation Framework
+# WayPoint — Enterprise Agentic AI Incident Investigation Framework
 
-PRISM is a modular, production-ready Python framework that investigates
+WayPoint is a modular, production-ready Python framework that investigates
 production incidents using **multiple cooperating intelligent agents**.
 
-When an incident is reported, PRISM runs a subset of specialized agents over
+When an incident is reported, WayPoint runs a subset of specialized agents over
 the available evidence, merges their findings into a causal graph, propagates
 confidence, reaches a weighted consensus on the root cause, produces a
 human-readable explanation, and — only after a root cause is **confirmed** by a
@@ -25,7 +25,7 @@ confidence and its continuously learned **reliability score**.
 | [`docs/API.md`](./docs/API.md) | HTTP API reference (all endpoints) |
 | [`docs/CONFIGURATION.md`](./docs/CONFIGURATION.md) | Every environment setting |
 | [`docs/SECURITY.md`](./docs/SECURITY.md) | Auth, redaction, trust boundary, production posture |
-| [`docs/DEVELOPMENT.md`](./docs/DEVELOPMENT.md) | Testing, extending PRISM, contributing |
+| [`docs/DEVELOPMENT.md`](./docs/DEVELOPMENT.md) | Testing, extending WayPoint, contributing |
 
 ---
 
@@ -66,7 +66,7 @@ confidence and its continuously learned **reliability score**.
   (service, failure type) with ETA and impact.
 - **Explainability + meta-reasoning** — every verdict comes with an evidence
   breakdown and per-agent usefulness analysis.
-- **Ground-truth-gated learning** — PRISM never learns from its own unverified
+- **Ground-truth-gated learning** — WayPoint never learns from its own unverified
   consensus; only resolution with a confirmed root cause updates patterns,
   memory, knowledge-graph edges, or agent reliability.
 - **Secure by default** — API-key auth (constant-time compare), PII/secret
@@ -113,7 +113,7 @@ This brings up:
 | PostgreSQL | `prism_postgres`| `5433 → 5432`              | Primary persistence                    |
 | Neo4j      | `prism_neo4j`  | `7474` (browser), `7687` (bolt) | Knowledge graph                   |
 | Ollama     | `prism_ollama` | `11434`                      | Local LLM + embeddings                 |
-| API        | `prism_api`    | `8000`                       | PRISM application + console            |
+| API        | `prism_api`    | `8000`                       | WayPoint application + console            |
 
 > The API container overrides `DATABASE_URL` to point at the internal
 > `postgres:5432` address; host tooling (psql, Alembic) should use the published
@@ -207,7 +207,7 @@ cp .env.example .env
 
 **Required in production** are `APP_ENV=production`, a strong `API_KEY`
 (generate one with `openssl rand -hex 32`), and explicit `CORS_ORIGINS`.
-PRISM refuses to start in production with weak or missing secrets.
+WayPoint refuses to start in production with weak or missing secrets.
 
 Key variables (the full reference lives in
 [docs/CONFIGURATION.md](./docs/CONFIGURATION.md)):
@@ -313,12 +313,12 @@ http://localhost:8000/
 ```
 
 It uses the same origin as the API by default. If you deploy the console
-separately from the API, define `window.PRISM_API_URL` **before** loading
+separately from the API, define `window.WAYPOINT_API_URL` **before** loading
 `static/app.js`, e.g.:
 
 ```html
 <script>
-  window.PRISM_API_URL = "https://api.example.com";
+  window.WAYPOINT_API_URL = "https://api.example.com";
 </script>
 <script src="/static/app.js"></script>
 ```
