@@ -878,6 +878,7 @@ async def _stream_investigation(
     # 1. Persist the incident - use repository's create_incident which has built-in deduplication
     from database.session import AsyncSessionLocal
 
+    reused = False
     async with AsyncSessionLocal() as session:
         existing = None
         if idempotency_key:
@@ -892,6 +893,26 @@ async def _stream_investigation(
                 safe_traces, safe_topology, safe_context, tenant_id, idempotency_key,
             )
         await session.commit()
+
+    if existing is not None or reused:
+        async with AsyncSessionLocal() as session:
+            existing_root = await get_root_cause(session, incident_id, tenant_id=tenant_id)
+            existing_incident = await get_incident(session, incident_id, tenant_id=tenant_id)
+        if existing_root is not None:
+            yield sse("idempotent_replay", {
+                "incident_id": incident_id,
+                "detail": "Investigation previously completed for this incident.",
+            })
+            result = await _result_for_existing_incident(
+                incident_id, tenant_id=tenant_id, reused=True, principal_role=principal_role
+            )
+            yield sse("investigation_result", result.model_dump())
+            return
+        if reused and existing_incident is not None and existing_incident.status == "investigating":
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="A matching incident is already under investigation",
+            )
 
     yield sse("incident_persisted", {
         "incident_id": incident_id,
