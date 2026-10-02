@@ -347,7 +347,21 @@ async def run_tree(
             stopping_reason = "no_remaining_candidates"
             break
 
+        # The LLM is a reasoning layer over specialist evidence, not a
+        # parallel evidence source. If a deterministic specialist still has
+        # sufficient MDV, execute it before the LLM. The LLM receives the
+        # accumulated evidence package through context["_evidence_package"].
         best_action = selection.remaining_actions[0]
+        if best_action["agent_name"] == "llm_analyzer":
+            specialist_actions = [
+                action
+                for action in selection.remaining_actions
+                if action["agent_name"] != "llm_analyzer"
+                and float(action.get("mdv", 0.0)) >= settings.MDV_THRESHOLD
+            ]
+            if specialist_actions:
+                best_action = specialist_actions[0]
+
         best_mdv = best_action.get("mdv", 0.0)
 
         if best_mdv < settings.MDV_THRESHOLD:
@@ -396,6 +410,22 @@ async def run_tree(
         all_findings.append(finding_dict)
         all_agents_used.append(target_agent)
         executed_agent_names.append(target_agent)
+
+        # Make specialist evidence available to the LLM reasoning agent on
+        # the real dynamic-tree path. Bound the package so a noisy log cannot
+        # turn into an unbounded prompt.
+        if target_agent != "llm_analyzer":
+            package_parts = []
+            for finding in all_findings:
+                package_parts.append(
+                    f"Agent: {finding.get('agent_name', 'unknown')}\\n"
+                    f"Type: {finding.get('finding_type', 'unknown')}\\n"
+                    f"Confidence: {float(finding.get('confidence', 0.0)):.3f}\\n"
+                    f"Finding: {str(finding.get('description', ''))[:1200]}\\n"
+                    f"Root-cause hint: {str(finding.get('root_cause_hint') or 'none')[:500]}\\n"
+                    f"Evidence: {str(finding.get('evidence') or {})[:1800]}"
+                )
+            context["_evidence_package"] = "\\n\\n".join(package_parts)[:12000]
 
         # Update remaining_actions in state and record executed action
         state.pop_action(target_agent, finding_dict)
