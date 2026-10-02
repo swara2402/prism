@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from config.settings import settings
 import random
 from datetime import datetime, timedelta, timezone
 from typing import Any, Awaitable, Callable, Optional
@@ -89,8 +90,13 @@ class LocalWorker:
         session_local = get_async_session_local()
 
         async with session_local() as session:
+            # Requeue abandoned leases before claiming new work. Without this,
+            # a worker killed after claiming a job leaves it in "running"
+            # forever.
+            await reclaim_stale_jobs(session, lease_seconds=settings.job_lease_seconds)
             job = await claim_next_job(session, self.worker_id)
             if job is None:
+                await session.commit()
                 return None
             await session.commit()
             job_id = job.id
@@ -106,6 +112,14 @@ class LocalWorker:
                 await session.commit()
             incident_id = await self._runner(payload)
             async with session_local() as session:
+                current = await get_job(session, job_id, tenant_id=tenant_id)
+                if current is not None and current.status == "cancelled":
+                    # Cancellation won the race while the investigation was
+                    # executing. Preserve the user's terminal state rather
+                    # than turning a cancelled job into a false "completed".
+                    current.result_incident_id = incident_id
+                    await session.commit()
+                    return job_id
                 await update_job(
                     session,
                     job_id,
@@ -126,6 +140,11 @@ class LocalWorker:
                 await session.commit()
             raise
         except Exception as exc:  # noqa: BLE001 — job failures are recorded, not raised
+            async with session_local() as session:
+                current = await get_job(session, job_id, tenant_id=tenant_id)
+                if current is not None and current.status == "cancelled":
+                    await session.commit()
+                    return job_id
             terminal = attempts >= job_attempts_max
             error = f"{type(exc).__name__}: {exc}"
             wait = _backoff(attempts, base_seconds=max(0.5, self.poll_interval))
