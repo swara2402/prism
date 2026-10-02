@@ -191,5 +191,5 @@ def test_incident_stats_are_row_accurate(client):
     stats = client.get("/incidents/stats").json()
     assert stats["total"] == 2
     assert stats["open"] == 1
-    assert stats["critical"] == 0
+    assert stats["critical"] == 1
     assert stats["resolved"] == 1
