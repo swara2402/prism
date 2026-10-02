@@ -155,7 +155,7 @@ def evaluate(
     return result
 
 
-async def persist_result(result: MetaReasoningResult) -> None:
+async def persist_result(result: MetaReasoningResult, *, tenant_id: str) -> None:
     """Persist a meta-reasoning result on the caller's owning async loop."""
     try:
         from database.session import AsyncSessionLocal
@@ -164,6 +164,7 @@ async def persist_result(result: MetaReasoningResult) -> None:
             await save_meta_reasoning(
                 session,
                 incident_id=result.incident_id,
+                tenant_id=tenant_id,
                 useful_agents=result.useful_agents,
                 unnecessary_agents=result.unnecessary_agents,
                 optimal_path=result.optimal_path,
