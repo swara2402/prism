@@ -522,7 +522,26 @@ async def _run_investigation(
             incident_id, tenant_id=tenant_id, reused=True
         )
 
-    # 2. Build investigation context (already redacted)
+    # 2. Build investigation context (already redacted). LLM credentials are
+    # resolved server-side from tenant workspace configuration and are never
+    # persisted in incident context.
+    llm_config: Dict[str, Any] = {}
+    try:
+        from database.service_models import WorkspaceConfig
+        from api.service import _decrypt
+        async with AsyncSessionLocal() as cfg_session:
+            cfg = await cfg_session.get(WorkspaceConfig, tenant_id)
+        if cfg is not None:
+            llm_config = {
+                "provider": cfg.llm_provider,
+                "model": cfg.llm_model,
+                "base_url": cfg.llm_base_url,
+                "api_key": _decrypt(cfg.llm_api_key_encrypted),
+                "timeout": settings.llm_request_timeout,
+            }
+    except Exception:
+        logger.exception("tenant_llm_config_load_failed", extra={"tenant_id": tenant_id})
+
     context: Dict[str, Any] = {
         # Explicit, not ambient. The ContextVar fallback is never populated in
         # the background worker, so relying on it silently disabled the
@@ -534,6 +553,7 @@ async def _run_investigation(
         "topology": safe_topology,
         "affected_services": incident_in.affected_services,
         "incident_type": incident_in.incident_type,
+        "_llm_config": llm_config,
     }
 
     start = time.perf_counter()
