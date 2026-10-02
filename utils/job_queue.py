@@ -84,7 +84,7 @@ class LocalWorker:
 
     async def process_once(self) -> Optional[str]:
         """Claim one job and run it to completion.  Returns the job id or None."""
-        from database.repositories import claim_next_job, update_job
+        from database.repositories import claim_next_job, get_job, reclaim_stale_jobs, update_job
         from database.session import get_async_session_local
 
         session_local = get_async_session_local()
