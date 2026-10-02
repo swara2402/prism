@@ -83,11 +83,10 @@ class LearningInput:
 
 def confirmed_root_cause(inp: LearningInput) -> Optional[str]:
     """Return the confirmed ground-truth root cause, if one is available."""
-    return (
-        (inp.ground_truth_root_cause or "").strip()
-        or (inp.root_cause or "").strip()
-        or None
-    )
+    # A confirmed RCA is the only admissible learning label. Never fall
+    # back to PRISM's own consensus/root_cause, because that would turn an
+    # unverified hypothesis into training data.
+    return (inp.ground_truth_root_cause or "").strip() or None
 
 
 async def _update_pattern_library(
