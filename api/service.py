@@ -82,6 +82,16 @@ class IngestOut(BaseModel):
     investigation: Any | None = None
 
 
+class IngestBatchRequest(BaseModel):
+    items: list[dict[str, Any]] = Field(..., min_length=1, max_length=100)
+    mapping: dict[str, str] | None = None
+    run_investigation: bool = False
+
+
+class IngestBatchOut(BaseModel):
+    items: list[IngestOut]
+
+
 async def _get_config(tenant_id: str) -> WorkspaceConfig:
     async with AsyncSessionLocal() as session:
         cfg = await session.get(WorkspaceConfig, tenant_id)
@@ -250,6 +260,35 @@ async def test_llm_connection(
     ok = await client.test_connection()
     return {"ok": ok, "provider": cfg.llm_provider, "model": cfg.llm_model}
 
+
+
+@router.post("/ingest/batch", response_model=IngestBatchOut, status_code=201)
+async def ingest_batch(
+    body: IngestBatchRequest,
+    request: Request,
+    _auth: str = Depends(require_api_key),
+    tenant: str = Depends(require_tenant),
+) -> IngestBatchOut:
+    """Ingest a bounded batch using the same canonicalization contract as /ingest."""
+    cfg = await _get_config(tenant)
+    merged_mapping = {**(cfg.schema_mapping or {}), **(body.mapping or {})}
+    results: list[IngestOut] = []
+    from database.repositories import create_incident
+    async with AsyncSessionLocal() as session:
+        for payload in body.items:
+            normalized, inferred = normalize_evidence(payload, merged_mapping)
+            try:
+                incident = IncidentCreate.model_validate(normalized)
+            except Exception as exc:
+                raise HTTPException(422, f"Customer data could not be normalized: {exc}") from exc
+            inc = await create_incident(session, tenant_id=tenant, title=incident.title,
+                description=incident.description, severity=incident.severity, status="open",
+                incident_type=incident.incident_type, affected_services=incident.affected_services,
+                raw_logs=incident.raw_logs, metrics=incident.metrics, traces=incident.traces,
+                topology=incident.topology, context=incident.context, started_at=incident.started_at)
+            results.append(IngestOut(incident_id=inc.id, normalized=normalized, mapping=inferred, investigation=None))
+        await session.commit()
+    return IngestBatchOut(items=results)
 @router.post("/schema-mapping/infer", response_model=SchemaMappingOut)
 async def infer_schema_mapping(
     body: dict[str, Any],
