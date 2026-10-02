@@ -289,23 +289,24 @@ async function loadOverview() {
   agentEl.innerHTML = skeletonRows(7);
   statsEl.innerHTML = `<div class="skeleton-rows" style="grid-column:1/-1">${Array(3).fill('<div class="skeleton"></div>').join("")}</div>`;
 
-  const [health, incidents, agents, pending, mstats] = await Promise.allSettled([
-    api("/internal/health"), api("/incidents?limit=50"), api("/agents"),
+  const [health, incidentStats, incidents, agents, pending, mstats] = await Promise.allSettled([
+    api("/internal/health"), api("/incidents/stats"), api("/incidents?limit=50"), api("/agents"),
     api("/patterns/pending"), api("/memory/stats"),
   ]);
 
   const inc = incidents.status === "fulfilled" ? incidents.value : [];
   const ag = agents.status === "fulfilled" ? agents.value : [];
   const pend = pending.status === "fulfilled" ? pending.value : [];
-  const open = inc.filter((i) => (i.status || "").toLowerCase() !== "resolved").length;
+  const stats = incidentStats.status === "fulfilled" ? incidentStats.value : null;
+  const open = stats ? Number(stats.open || 0) : inc.filter((i) => !["resolved", "closed"].includes((i.status || "").toLowerCase())).length;
 
   const card = (label, value, foot, cls) =>
     `<div class="stat-card ${cls || ""}"><span class="stat-label">${label}</span>
      <div class="stat-value">${value}</div>${foot ? `<div class="stat-foot">${foot}</div>` : ""}</div>`;
 
   statsEl.innerHTML = [
-    card("Total incidents", inc.length, incidents.status === "fulfilled" ? `${relTime(inc[0]?.created_at)} newest` : "unavailable", "acc"),
-    card("Open incidents", open, inc.length ? `${open ? "attention needed" : "all clear"}` : "—", open ? "warn" : "ok"),
+    card("Total incidents", stats ? Number(stats.total || 0) : inc.length, stats ? "database aggregate" : (incidents.status === "fulfilled" ? `${relTime(inc[0]?.created_at)} newest` : "unavailable"), "acc"),
+    card("Open incidents", open, stats ? `${Number(stats.critical || 0)} critical` : (inc.length ? `${open ? "attention needed" : "all clear"}` : "—"), open ? "warn" : "ok"),
     card("Agents", ag.length, "registered analyzers", "acc"),
     card("Patterns pending", pend.length, pend.length ? "awaiting approval" : "none", pend.length ? "warn" : "ok"),
     card("Memory size", health.status === "fulfilled" ? health.value.memory_size : "—", "embedded incidents", "acc"),
