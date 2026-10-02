@@ -149,3 +149,47 @@ def test_investigate_stream(client):
     assert "event: incident_persisted" in text
     assert "event: verdict" in text
 
+
+def test_incident_stats_are_row_accurate(client):
+    first = client.post(
+        "/incidents/investigate",
+        json={
+            "title": "checkout latency spike one",
+            "severity": "P1",
+            "affected_services": ["checkout-one"],
+            "raw_logs": ["ERROR checkout-one timeout"],
+        },
+    )
+    assert first.status_code == 200, first.text
+
+    second = client.post(
+        "/incidents/investigate",
+        json={
+            "title": "payments database outage two",
+            "severity": "P3",
+            "affected_services": ["payments-two"],
+            "raw_logs": ["ERROR payments-two database unavailable"],
+        },
+    )
+    assert second.status_code == 200, second.text
+
+    stats = client.get("/incidents/stats")
+    assert stats.status_code == 200, stats.text
+    body = stats.json()
+    assert body["total"] == 2
+    assert body["open"] == 2
+    assert body["critical"] == 1
+    assert body["resolved"] == 0
+
+    incident_id = first.json()["incident_id"]
+    resolved = client.post(
+        f"/incidents/{incident_id}/resolve",
+        json={"action": "rollback", "verified": True},
+    )
+    assert resolved.status_code == 200, resolved.text
+
+    stats = client.get("/incidents/stats").json()
+    assert stats["total"] == 2
+    assert stats["open"] == 1
+    assert stats["critical"] == 0
+    assert stats["resolved"] == 1
