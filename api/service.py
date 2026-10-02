@@ -333,26 +333,29 @@ async def ingest_batch(
     async with AsyncSessionLocal() as session:
         for index, payload in enumerate(body.items):
             try:
-                normalized, inferred = normalize_evidence(payload, merged_mapping)
-                incident = IncidentCreate.model_validate(normalized)
-                inc = await create_incident(
-                    session,
-                    tenant_id=tenant,
-                    title=incident.title,
-                    description=incident.description,
-                    severity=incident.severity,
-                    status="open",
-                    incident_type=incident.incident_type,
-                    affected_services=incident.affected_services,
-                    raw_logs=incident.raw_logs,
-                    metrics=incident.metrics,
-                    traces=incident.traces,
-                    topology=incident.topology,
-                    context=incident.context,
-                    started_at=incident.started_at,
-                )
-                results.append(
-                    IngestBatchItem(
+                # A savepoint isolates one bad record from the rest of the
+                # batch, so an IntegrityError/flush failure does not poison
+                # the outer transaction.
+                async with session.begin_nested():
+                    normalized, inferred = normalize_evidence(payload, merged_mapping)
+                    incident = IncidentCreate.model_validate(normalized)
+                    inc = await create_incident(
+                        session,
+                        tenant_id=tenant,
+                        title=incident.title,
+                        description=incident.description,
+                        severity=incident.severity,
+                        status="open",
+                        incident_type=incident.incident_type,
+                        affected_services=incident.affected_services,
+                        raw_logs=incident.raw_logs,
+                        metrics=incident.metrics,
+                        traces=incident.traces,
+                        topology=incident.topology,
+                        context=incident.context,
+                        started_at=incident.started_at,
+                    )
+                    result = IngestBatchItem(
                         index=index,
                         success=True,
                         result=IngestOut(
@@ -362,7 +365,7 @@ async def ingest_batch(
                             investigation=None,
                         ),
                     )
-                )
+                results.append(result)
             except Exception:
                 results.append(
                     IngestBatchItem(
