@@ -665,7 +665,7 @@ async def _run_investigation(
         agents_used=agents_used,
         persist=False,
     )
-    await persist_meta_reasoning(meta)
+    await persist_meta_reasoning(meta, tenant_id=tenant_id)
 
     # 11. Mark the investigation phase complete. Findings were already
     #     persisted by the orchestrator (with root_cause_hint provenance) so a
@@ -1022,7 +1022,7 @@ async def _stream_investigation(
         agents_used=agents_used,
         persist=False,
     )
-    await persist_meta_reasoning(meta)
+    await persist_meta_reasoning(meta, tenant_id=tenant_id)
 
     # 11. Mark the investigation phase complete; "analyzed" closes the
     #     deduplication window that a lingering "investigating" kept open.
