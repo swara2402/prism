@@ -7,9 +7,10 @@ import json
 from typing import Any
 
 from cryptography.fernet import Fernet, InvalidToken
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
 from api.deps import require_api_key, require_tenant
 from config.settings import settings
@@ -198,6 +199,7 @@ async def ingest(
     response: Response,
     _auth: str = Depends(require_api_key),
     tenant: str = Depends(require_tenant),
+    x_idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
 ) -> IngestOut:
     """Accept customer-shaped data, normalize it, persist it, optionally investigate."""
     cfg = await _get_config(tenant)
@@ -210,6 +212,8 @@ async def ingest(
         incident = IncidentCreate.model_validate(normalized)
     except Exception as exc:
         raise HTTPException(422, f"Customer data could not be normalized: {exc}") from exc
+
+    idem_key = (x_idempotency_key or "").strip()[:128] or None
 
     # Investigation requests go through the durable job queue. The API
     # persists customer data only once and returns immediately with a 202-style
@@ -225,13 +229,21 @@ async def ingest(
             "tenant_id": tenant,
             "request_id": getattr(request.state, "request_id", "ingest"),
             "enqueued_at": datetime.now(timezone.utc).isoformat(),
+            "idempotency_key": idem_key,
         }
-        job = await enqueue_investigation(
-            payload,
-            idempotency_key=None,
-            tenant_id=tenant,
-            attempts_max=settings.job_attempts_max,
-        )
+        try:
+            job = await enqueue_investigation(
+                payload,
+                idempotency_key=idem_key,
+                tenant_id=tenant,
+                attempts_max=settings.job_attempts_max,
+            )
+        except IntegrityError:
+            from database.repositories import get_job_by_idempotency_key
+            async with AsyncSessionLocal() as session:
+                job = await get_job_by_idempotency_key(session, idem_key, tenant_id=tenant)
+            if job is None:
+                raise HTTPException(409, "Idempotency key already in use")
         investigation = {
             "job_id": job.id,
             "status": job.status,
@@ -239,8 +251,12 @@ async def ingest(
         }
         incident_id = None
     else:
-        from database.repositories import create_incident
+        from database.repositories import create_incident, get_incident_by_idempotency_key
         async with AsyncSessionLocal() as session:
+            if idem_key:
+                existing = await get_incident_by_idempotency_key(session, idem_key, tenant_id=tenant)
+                if existing is not None:
+                    return IngestOut(incident_id=existing.id, normalized=normalized, mapping=inferred, investigation=None)
             inc = await create_incident(
                 session,
                 tenant_id=tenant,
@@ -256,6 +272,7 @@ async def ingest(
                 topology=incident.topology,
                 context=incident.context,
                 started_at=incident.started_at,
+                idempotency_key=idem_key,
             )
             await session.commit()
             incident_id = inc.id
@@ -346,12 +363,12 @@ async def ingest_batch(
                         ),
                     )
                 )
-            except Exception as exc:
+            except Exception:
                 results.append(
                     IngestBatchItem(
                         index=index,
                         success=False,
-                        error=f"Customer data could not be ingested: {exc}",
+                        error="Customer data could not be ingested; check the payload against the canonical schema.",
                     )
                 )
 
