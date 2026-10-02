@@ -1,6 +1,6 @@
-# PRISM User Guide
+# WayPoint User Guide
 
-PRISM is designed to answer one question quickly: **what is causing this incident, and what evidence supports that conclusion?**
+WayPoint is designed to answer one question quickly: **what is causing this incident, and what evidence supports that conclusion?**
 
 ## 1. Start PRISM
 
@@ -36,7 +36,7 @@ Then open `http://localhost:8000`.
 6. Paste logs, metrics, traces, or context.
 7. Click **Run investigation**.
 
-PRISM streams the investigation so you can see which agents finish, when the causal graph is built, and when consensus is reached.
+WayPoint streams the investigation so you can see which agents finish, when the causal graph is built, and when consensus is reached.
 
 ## 3. Read the result
 
@@ -46,7 +46,7 @@ Then inspect:
 
 - **Confidence**: how strongly the evidence supports the conclusion.
 - **Causal chain**: the sequence of related nodes leading to the proposed cause.
-- **Alternative hypotheses**: competing explanations considered by PRISM.
+- **Alternative hypotheses**: competing explanations considered by WayPoint.
 - **Agent findings**: what individual analyzers observed.
 - **Explanation**: the evidence-based reasoning behind the result.
 
@@ -89,7 +89,7 @@ Open **Settings**, enter the configured `API_KEY`, and save it for the current b
 
 ### Investigation is busy
 
-PRISM deliberately limits concurrent investigations. Wait for an active investigation to finish or run the asynchronous investigation endpoint for queue-based workloads.
+WayPoint deliberately limits concurrent investigations. Wait for an active investigation to finish or run the asynchronous investigation endpoint for queue-based workloads.
 
 ### No root cause yet
 
@@ -97,4 +97,4 @@ An investigation can finish in a degraded state if one or more agents fail. Insp
 
 ## 7. Production rule of thumb
 
-The console is the human-friendly layer. Production deployments should put PRISM behind HTTPS and a reverse proxy/load balancer, keep databases private, configure explicit CORS, protect credentials, and use real identity/RBAC before serving multiple organizations.
+The console is the human-friendly layer. Production deployments should put WayPoint behind HTTPS and a reverse proxy/load balancer, keep databases private, configure explicit CORS, protect credentials, and use real identity/RBAC before serving multiple organizations.
