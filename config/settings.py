@@ -254,10 +254,6 @@ class Settings(BaseSettings):
         errors: List[str] = []
         if not self.jwt_secret:
             errors.append("PRISM_JWT_SECRET is not configured")
-        if not self.llm_credential_secret:
-            errors.append("WAYPOINT_LLM_CREDENTIAL_SECRET is not configured")
-        elif len(self.llm_credential_secret) < self.jwt_secret_min_length:
-            errors.append("WAYPOINT_LLM_CREDENTIAL_SECRET is too short")
         elif len(self.jwt_secret) < self.jwt_secret_min_length:
             errors.append(
                 f"PRISM_JWT_SECRET is too short (min {self.jwt_secret_min_length} characters)"
