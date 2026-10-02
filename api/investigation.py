@@ -217,8 +217,27 @@ async def _persist_incident(
     safe_context: Dict[str, Any],
     tenant_id: str,
     idempotency_key: Optional[str],
-) -> str:
-    """Create (or merge into) the incident row and return its id."""
+) -> tuple[str, bool]:
+    """Create an incident or reuse a matching row without breaking idempotency."""
+    from database.repositories import get_similar_incident
+
+    existing = await get_similar_incident(
+        session,
+        title=incident_in.title,
+        affected_services=incident_in.affected_services,
+        started_at=incident_in.started_at,
+        tenant_id=tenant_id,
+    )
+    if existing is not None:
+        # Never replace another request's idempotency key. If this request is
+        # the first keyed request for an otherwise-existing incident, it may
+        # claim the empty slot.
+        if idempotency_key and not getattr(existing, "idempotency_key", None):
+            await update_incident(
+                session, existing.id, tenant_id=tenant_id, idempotency_key=idempotency_key
+            )
+        return existing.id, True
+
     inc = await create_incident(
         session,
         title=incident_in.title,
@@ -233,13 +252,10 @@ async def _persist_incident(
         topology=safe_topology,
         context=safe_context,
         started_at=incident_in.started_at,
+        idempotency_key=idempotency_key,
         tenant_id=tenant_id,
     )
-    if idempotency_key and getattr(inc, "idempotency_key", None) != idempotency_key:
-        await update_incident(
-            session, inc.id, tenant_id=tenant_id, idempotency_key=idempotency_key
-        )
-    return inc.id
+    return inc.id, False
 
 
 def _build_agent_statuses(findings: List[Any]) -> List[Dict[str, Any]]:
@@ -515,7 +531,7 @@ async def _run_investigation(
                 )
                 incident_id = existing.id
             else:
-                incident_id = await _persist_incident(
+                incident_id, reused = await _persist_incident(
                     session, incident_in, safe_description, safe_logs, safe_metrics,
                     safe_traces, safe_topology, safe_context, tenant_id, idempotency_key,
                 )
@@ -542,6 +558,20 @@ async def _run_investigation(
         return await _result_for_existing_incident(
             incident_id, tenant_id=tenant_id, reused=True
         )
+
+    if reused:
+        async with AsyncSessionLocal() as session:
+            existing_root = await get_root_cause(session, incident_id, tenant_id=tenant_id)
+            existing_incident = await get_incident(session, incident_id, tenant_id=tenant_id)
+        if existing_root is not None:
+            return await _result_for_existing_incident(
+                incident_id, tenant_id=tenant_id, reused=True
+            )
+        if existing_incident is not None and existing_incident.status == "investigating":
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="A matching incident is already under investigation",
+            )
 
     # 2. Build investigation context (already redacted). LLM credentials are
     # resolved server-side from tenant workspace configuration and are never
@@ -857,7 +887,7 @@ async def _stream_investigation(
         if existing is not None:
             incident_id = existing.id
         else:
-            incident_id = await _persist_incident(
+            incident_id, reused = await _persist_incident(
                 session, incident_in, safe_description, safe_logs, safe_metrics,
                 safe_traces, safe_topology, safe_context, tenant_id, idempotency_key,
             )
