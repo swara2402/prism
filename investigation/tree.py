@@ -476,6 +476,28 @@ async def run_tree(
             }
         )
 
+    # Preserve a deterministic evidence baseline for log-backed incidents.
+    # Adaptive MDV may otherwise stop after an agent that produced no explicit
+    # hypothesis, leaving the investigation with no gradeable provenance.
+    # The rule engine is deterministic and is executed at most once.
+    has_hint = any(
+        finding.get("root_cause_hint") or (finding.get("hypotheses") or [])
+        for finding in all_findings
+    )
+    if context.get("logs") and not has_hint and "rule_based_analyzer" not in executed_agent_names:
+        try:
+            baseline = await execute_action(
+                agent_name="rule_based_analyzer",
+                context=context,
+                incident_id=incident_id,
+            )
+            baseline_dict = baseline.to_dict()
+            all_findings.append(baseline_dict)
+            all_agents_used.append("rule_based_analyzer")
+            executed_agent_names.append("rule_based_analyzer")
+        except Exception as exc:
+            logger.warning("deterministic_baseline_failed", error=repr(exc))
+
     # Isolated fallback path: only executed if enable_fallback is explicitly set to True
     if not all_findings and enable_fallback:
         from orchestrator.engine import execute_multi_agent_fallback
