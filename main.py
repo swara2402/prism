@@ -24,6 +24,7 @@ from api.memory import router as memory_router
 from api.patterns import router as patterns_router
 from api.predictions import router as predictions_router
 from api.service import router as service_router
+from api.connectors import router as connectors_router
 from auth.security import COOKIE_NAME, bootstrap_owner, decode_access_token
 from config.logging import configure_logging, get_logger
 from config.settings import settings
@@ -146,6 +147,7 @@ app.include_router(kg_router)
 app.include_router(agents_router)
 app.include_router(predictions_router)
 app.include_router(service_router)
+app.include_router(connectors_router)
 
 
 @app.get("/health", tags=["meta"])
