@@ -210,19 +210,32 @@ async def ingest(
     except Exception as exc:
         raise HTTPException(422, f"Customer data could not be normalized: {exc}") from exc
 
-    # An analyzed ingest must enter the existing investigation pipeline directly.
-    # Do not persist an "open" row first and then create/deduplicate a second row
-    # inside _run_investigation.
+    # Investigation requests go through the durable job queue. The API
+    # persists customer data only once and returns immediately with a 202-style
+    # job payload embedded in the existing response contract.
     investigation = None
     if body.run_investigation:
-        from api.investigation import _run_investigation
-        investigation = await _run_investigation(
-            incident,
-            request_id=getattr(request.state, "request_id", "ingest"),
+        from utils.job_queue import enqueue_investigation
+        from datetime import datetime, timezone
+
+        payload = {
+            "incident": incident.model_dump(mode="json"),
+            "tenant_id": tenant,
+            "request_id": getattr(request.state, "request_id", "ingest"),
+            "enqueued_at": datetime.now(timezone.utc).isoformat(),
+        }
+        job = await enqueue_investigation(
+            payload,
+            idempotency_key=None,
             tenant_id=tenant,
-            principal_role=getattr(getattr(request.state, "principal", None), "role", "engineer"),
+            attempts_max=settings.job_attempts_max,
         )
-        incident_id = investigation.incident_id
+        investigation = {
+            "job_id": job.id,
+            "status": job.status,
+            "progress": job.progress,
+        }
+        incident_id = None
     else:
         from database.repositories import create_incident
         async with AsyncSessionLocal() as session:
