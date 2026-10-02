@@ -23,6 +23,15 @@
       #wp-service-settings .wp-full { grid-column:1/-1; }
       #wp-service-settings .wp-actions { display:flex; gap:9px; justify-content:flex-end; margin-top:18px; flex-wrap:wrap; }
       #wp-service-settings .wp-status { margin-top:12px; min-height:18px; font-size:12px; opacity:.8; }
+      #wp-service-settings .wp-onboarding { margin:0 0 18px; padding:13px; border:1px solid rgba(255,255,255,.09); border-radius:12px; background:rgba(255,255,255,.025); }
+      #wp-service-settings .wp-steps { display:flex; gap:7px; flex-wrap:wrap; margin-top:9px; }
+      #wp-service-settings .wp-step { padding:5px 8px; border-radius:999px; font-size:10px; border:1px solid rgba(255,255,255,.1); opacity:.65; }
+      #wp-service-settings .wp-step.done { opacity:1; border-color:rgba(110,231,183,.45); color:#6ee7b7; }
+      #wp-service-settings .wp-connectors { margin-top:18px; padding-top:18px; border-top:1px solid rgba(255,255,255,.08); }
+      #wp-service-settings .wp-connector-list { display:grid; gap:8px; margin-top:10px; }
+      #wp-service-settings .wp-connector-row { display:flex; justify-content:space-between; gap:10px; align-items:center; padding:9px 10px; border:1px solid rgba(255,255,255,.08); border-radius:10px; font-size:11px; }
+      #wp-service-settings .wp-connector-meta { opacity:.62; }
+      #wp-service-settings .wp-connector-actions { display:flex; gap:6px; flex-wrap:wrap; }
       #wp-service-settings .wp-note { font-size:11px; opacity:.58; line-height:1.45; }
       @media(max-width:650px){ #wp-service-settings .wp-grid{grid-template-columns:1fr;} #wp-service-settings .wp-full{grid-column:auto;} }
     `;
@@ -43,6 +52,10 @@
             <div class="wp-sub">Tenant-scoped LLM credentials and customer schema mapping</div>
           </div>
           <button type="button" class="icon-btn" id="wp-settings-close" aria-label="Close">×</button>
+        </div>
+        <div class="wp-onboarding">
+          <div><b>Customer onboarding</b><div class="wp-sub">Connect → understand schema → confirm mapping → ingest → investigate → learn</div></div>
+          <div class="wp-steps" id="wp-onboarding-steps"></div>
         </div>
         <div class="wp-grid">
           <label>LLM provider
@@ -70,8 +83,26 @@
             <textarea id="wp-schema-sample" spellcheck="false" placeholder='{"time":"2026-10-02T10:00:00Z","application":"payments-api","exception":"DB timeout","duration":842}'></textarea>
           </label>
         </div>
+        <div class="wp-connectors">
+          <div><b>Evidence connectors</b><div class="wp-sub">Pull JSON from a customer endpoint or receive signed webhook events.</div></div>
+          <div class="wp-grid" style="margin-top:10px">
+            <label>Connector name<input id="wp-connector-name" placeholder="Production incident feed"></label>
+            <label>Source type<select id="wp-connector-source"><option value="incidents">Incidents</option><option value="logs">Logs</option><option value="metrics">Metrics</option><option value="traces">Traces</option></select></label>
+            <label>Connector type<select id="wp-connector-kind"><option value="webhook">Signed webhook</option><option value="http_json">HTTP JSON pull</option></select></label>
+            <label>HTTP method<select id="wp-connector-method"><option>GET</option><option>POST</option></select></label>
+            <label class="wp-full">Endpoint URL<input id="wp-connector-url" placeholder="https://customer.example.com/observability/incidents"></label>
+            <label class="wp-full">Bearer token<input id="wp-connector-token" type="password" autocomplete="new-password" placeholder="Optional"></label>
+            <label class="wp-full">Payload path<input id="wp-connector-path" placeholder="data.items"></label>
+          </div>
+          <div class="wp-actions">
+            <button type="button" class="btn btn-ghost" id="wp-connector-test">Test selected connector</button>
+            <button type="button" class="btn btn-primary" id="wp-connector-add">Add connector</button>
+          </div>
+          <div class="wp-connector-list" id="wp-connector-list"></div>
+        </div>
         <div class="wp-actions">
           <button type="button" class="btn btn-ghost" id="wp-schema-infer">Infer mapping</button>
+          <button type="button" class="btn btn-ghost" id="wp-schema-propose">AI propose mapping</button>
           <button type="button" class="btn btn-ghost" id="wp-llm-test">Test LLM connection</button>
           <button type="button" class="btn btn-primary" id="wp-settings-save">Save configuration</button>
         </div>
@@ -97,6 +128,29 @@
       return data;
     }
 
+    async function loadOnboarding() {
+      try {
+        const data = await api("/service/onboarding");
+        document.getElementById("wp-onboarding-steps").innerHTML = (data.stages || []).map(step =>
+          `<span class="wp-step ${step.complete ? "done" : ""}">${step.complete ? "✓ " : ""}${esc(step.label)}</span>`
+        ).join("");
+        const list = document.getElementById("wp-connector-list");
+        list.innerHTML = (data.connectors || []).length
+          ? data.connectors.map(c => `<div class="wp-connector-row"><div><b>${esc(c.name)}</b><div class="wp-connector-meta">${esc(c.source_type)} · ${esc(c.kind)} · ${esc(c.last_status || "never synced")}</div></div><div class="wp-connector-actions">${c.kind === "http_json" ? `<button class="btn btn-ghost" data-connector-sync="${esc(c.id)}">Sync</button>` : ""}<button class="btn btn-ghost" data-connector-test-id="${esc(c.id)}">Test</button><button class="btn btn-ghost" data-connector-delete="${esc(c.id)}">Delete</button></div></div>`).join("")
+          : '<div class="wp-note">No customer connector configured yet.</div>';
+        list.querySelectorAll("[data-connector-sync]").forEach(btn => btn.onclick = async () => {
+          try { const d = await api(`/service/connectors/${btn.dataset.connectorSync}/sync`, {method:"POST", body:"{}"}); status(`Sync complete: ${d.created} created, ${d.duplicates} duplicates.`, true); await loadOnboarding(); } catch(e) { status(e.message); }
+        });
+        list.querySelectorAll("[data-connector-test-id]").forEach(btn => btn.onclick = async () => {
+          try { const d = await api(`/service/connectors/${btn.dataset.connectorTestId}/test`, {method:"POST", body:"{}"}); status(d.ok ? `Connector reachable. ${d.records} record(s) detected.` : d.error, d.ok); } catch(e) { status(e.message); }
+        });
+        list.querySelectorAll("[data-connector-delete]").forEach(btn => btn.onclick = async () => {
+          if (!confirm("Delete this connector?")) return;
+          try { await api(`/service/connectors/${btn.dataset.connectorDelete}`, {method:"DELETE"}); status("Connector deleted.", true); await loadOnboarding(); } catch(e) { status(e.message); }
+        });
+      } catch (e) { status(e.message); }
+    }
+
     async function load() {
       try {
         const [llm, mapping] = await Promise.all([
@@ -108,6 +162,7 @@
         document.getElementById("wp-llm-base").value = llm.base_url || "";
         document.getElementById("wp-schema-map").value = JSON.stringify(mapping.mapping || {}, null, 2);
         status(llm.configured ? "LLM configured for this workspace." : "LLM configuration is incomplete.");
+        await loadOnboarding();
       } catch (e) { status(e.message); }
     }
 
@@ -136,12 +191,61 @@
       } catch (e) { status(e.message); }
     };
 
+    document.getElementById("wp-schema-propose").onclick = async () => {
+      try {
+        const sample = jsonParse("wp-schema-sample");
+        const data = await api("/service/schema-mapping/propose", {method:"POST", body:JSON.stringify({sample})});
+        document.getElementById("wp-schema-map").value = JSON.stringify(data.mapping || {}, null, 2);
+        status(data.source === "llm+deterministic" ? "AI proposal ready. Review and save it." : "Deterministic proposal ready. Review and save it.", true);
+      } catch (e) { status(e.message); }
+    };
+
     document.getElementById("wp-schema-infer").onclick = async () => {
       try {
         const sample = jsonParse("wp-schema-sample");
         const data = await api("/service/schema-mapping/infer", {method:"POST", body:JSON.stringify(sample)});
         document.getElementById("wp-schema-map").value = JSON.stringify(data.mapping || {}, null, 2);
         status("Mapping inferred. Review it and save it for this workspace.", true);
+      } catch (e) { status(e.message); }
+    };
+
+    document.getElementById("wp-connector-add").onclick = async () => {
+      try {
+        const kind = document.getElementById("wp-connector-kind").value;
+        const body = {
+          name: document.getElementById("wp-connector-name").value.trim(),
+          kind,
+          source_type: document.getElementById("wp-connector-source").value,
+          endpoint_url: kind === "http_json" ? document.getElementById("wp-connector-url").value.trim() || null : null,
+          http_method: document.getElementById("wp-connector-method").value,
+          auth_token: document.getElementById("wp-connector-token").value || null,
+          payload_path: document.getElementById("wp-connector-path").value.trim() || null
+        };
+        if (!body.name) throw new Error("Connector name is required.");
+        await api("/service/connectors", {method:"POST", body:JSON.stringify(body)});
+        document.getElementById("wp-connector-token").value = "";
+        status("Connector added.", true);
+        await loadOnboarding();
+      } catch (e) { status(e.message); }
+    };
+
+    document.getElementById("wp-connector-test").onclick = async () => {
+      try {
+        const kind = document.getElementById("wp-connector-kind").value;
+        if (kind === "webhook") { status("Webhook is ready to receive signed events.", true); return; }
+        const body = {
+          name: document.getElementById("wp-connector-name").value.trim() || "Connection test",
+          kind,
+          source_type: document.getElementById("wp-connector-source").value,
+          endpoint_url: document.getElementById("wp-connector-url").value.trim(),
+          http_method: document.getElementById("wp-connector-method").value,
+          auth_token: document.getElementById("wp-connector-token").value || null,
+          payload_path: document.getElementById("wp-connector-path").value.trim() || null
+        };
+        const created = await api("/service/connectors", {method:"POST", body:JSON.stringify(body)});
+        const result = await api(`/service/connectors/${created.id}/test`, {method:"POST", body:"{}"});
+        await api(`/service/connectors/${created.id}`, {method:"DELETE"});
+        status(result.ok ? `Connection verified. ${result.records} record(s) detected.` : result.error, result.ok);
       } catch (e) { status(e.message); }
     };
 
