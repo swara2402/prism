@@ -88,8 +88,17 @@ class IngestBatchRequest(BaseModel):
     run_investigation: bool = False
 
 
+class IngestBatchItem(BaseModel):
+    index: int
+    success: bool
+    result: IngestOut | None = None
+    error: str | None = None
+
+
 class IngestBatchOut(BaseModel):
-    items: list[IngestOut]
+    items: list[IngestBatchItem]
+    succeeded: int
+    failed: int
 
 
 async def _get_config(tenant_id: str) -> WorkspaceConfig:
@@ -268,30 +277,80 @@ async def test_llm_connection(
 @router.post("/ingest/batch", response_model=IngestBatchOut, status_code=201)
 async def ingest_batch(
     body: IngestBatchRequest,
-    request: Request,
     _auth: str = Depends(require_api_key),
     tenant: str = Depends(require_tenant),
 ) -> IngestBatchOut:
-    """Ingest a bounded batch using the same canonicalization contract as /ingest."""
+    """Ingest a bounded batch with per-record validation and persistence results.
+
+    Batch ingestion intentionally persists only. Investigations are submitted
+    through the investigation/job API so one slow LLM call cannot hold a batch
+    transaction open.
+    """
+    if body.run_investigation:
+        raise HTTPException(
+            422,
+            "Batch ingestion does not run investigations synchronously; ingest first, then submit investigations through the job API.",
+        )
+
     cfg = await _get_config(tenant)
     merged_mapping = {**(cfg.schema_mapping or {}), **(body.mapping or {})}
-    results: list[IngestOut] = []
+    results: list[IngestBatchItem] = []
+
     from database.repositories import create_incident
+
     async with AsyncSessionLocal() as session:
-        for payload in body.items:
-            normalized, inferred = normalize_evidence(payload, merged_mapping)
+        for index, payload in enumerate(body.items):
             try:
+                normalized, inferred = normalize_evidence(payload, merged_mapping)
                 incident = IncidentCreate.model_validate(normalized)
+                inc = await create_incident(
+                    session,
+                    tenant_id=tenant,
+                    title=incident.title,
+                    description=incident.description,
+                    severity=incident.severity,
+                    status="open",
+                    incident_type=incident.incident_type,
+                    affected_services=incident.affected_services,
+                    raw_logs=incident.raw_logs,
+                    metrics=incident.metrics,
+                    traces=incident.traces,
+                    topology=incident.topology,
+                    context=incident.context,
+                    started_at=incident.started_at,
+                )
+                results.append(
+                    IngestBatchItem(
+                        index=index,
+                        success=True,
+                        result=IngestOut(
+                            incident_id=inc.id,
+                            normalized=normalized,
+                            mapping={**inferred, **(body.mapping or {})},
+                            investigation=None,
+                        ),
+                    )
+                )
             except Exception as exc:
-                raise HTTPException(422, f"Customer data could not be normalized: {exc}") from exc
-            inc = await create_incident(session, tenant_id=tenant, title=incident.title,
-                description=incident.description, severity=incident.severity, status="open",
-                incident_type=incident.incident_type, affected_services=incident.affected_services,
-                raw_logs=incident.raw_logs, metrics=incident.metrics, traces=incident.traces,
-                topology=incident.topology, context=incident.context, started_at=incident.started_at)
-            results.append(IngestOut(incident_id=inc.id, normalized=normalized, mapping=inferred, investigation=None))
+                results.append(
+                    IngestBatchItem(
+                        index=index,
+                        success=False,
+                        error=f"Customer data could not be ingested: {exc}",
+                    )
+                )
+
+        # Successful rows are committed even when individual records failed.
         await session.commit()
-    return IngestBatchOut(items=results)
+
+    succeeded = sum(1 for item in results if item.success)
+    return IngestBatchOut(
+        items=results,
+        succeeded=succeeded,
+        failed=len(results) - succeeded,
+    )
+
+
 @router.post("/schema-mapping/infer", response_model=SchemaMappingOut)
 async def infer_schema_mapping(
     body: dict[str, Any],
