@@ -403,11 +403,16 @@ async def onboarding_status(
     explained_count = await session.scalar(
         select(__import__("sqlalchemy").func.count(RootCause.id)).where(RootCause.tenant_id == tenant)
     )
-    confirmed_count = await session.scalar(
-        select(__import__("sqlalchemy").func.count(Resolution.id)).where(
-            Resolution.tenant_id == tenant,
-            Resolution.metadata_["confirmed_root_cause"].as_string().is_not(None),
+    resolution_rows = (
+        await session.execute(
+            select(Resolution).where(Resolution.tenant_id == tenant)
         )
+    ).scalars().all()
+    confirmed_count = sum(
+        1
+        for resolution in resolution_rows
+        if isinstance(resolution.metadata_, dict)
+        and str(resolution.metadata_.get("confirmed_root_cause") or "").strip()
     )
     learned_count = await session.scalar(
         select(__import__("sqlalchemy").func.count(LessonLearned.id)).where(LessonLearned.tenant_id == tenant)
