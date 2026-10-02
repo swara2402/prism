@@ -7,7 +7,7 @@ import json
 from typing import Any
 
 from cryptography.fernet import Fernet, InvalidToken
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 
@@ -195,6 +195,7 @@ async def set_schema_mapping(
 async def ingest(
     body: IngestRequest,
     request: Request,
+    response: Response,
     _auth: str = Depends(require_api_key),
     tenant: str = Depends(require_tenant),
 ) -> IngestOut:
@@ -215,6 +216,7 @@ async def ingest(
     # job payload embedded in the existing response contract.
     investigation = None
     if body.run_investigation:
+        response.status_code = 202
         from utils.job_queue import enqueue_investigation
         from datetime import datetime, timezone
 
