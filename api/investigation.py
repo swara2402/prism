@@ -75,6 +75,7 @@ from models.schemas import (
     MetaReasoningOut,
     AlternativeHypothesis,
 )
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from utils.rate_limit import build_rate_limiter
 
@@ -106,6 +107,26 @@ def apply_graph_traversal_fallback(
     return consensus
 
 router = APIRouter(prefix="/incidents", tags=["incidents"])
+
+
+@router.get("/stats")
+async def incident_stats(
+    _api_key: str = Depends(require_api_key),
+    tenant: str = Depends(require_tenant),
+) -> Dict[str, int]:
+    """Return tenant-scoped incident totals for service dashboards."""
+    from database.session import AsyncSessionLocal
+    from database import models as dbm
+
+    async with AsyncSessionLocal() as session:
+        total = await session.scalar(select(func.count()).select_from(dbm.Incident).where(dbm.Incident.tenant_id == tenant))
+        open_count = await session.scalar(select(func.count()).select_from(dbm.Incident).where(
+            dbm.Incident.tenant_id == tenant, dbm.Incident.status.notin_(["resolved", "closed"])))
+        critical = await session.scalar(select(func.count()).select_from(dbm.Incident).where(
+            dbm.Incident.tenant_id == tenant, dbm.Incident.severity.in_(["P0", "P1", "critical", "CRITICAL"])))
+        resolved = await session.scalar(select(func.count()).select_from(dbm.Incident).where(
+            dbm.Incident.tenant_id == tenant, dbm.Incident.status.in_(["resolved", "closed"])))
+    return {"total": int(total or 0), "open": int(open_count or 0), "critical": int(critical or 0), "resolved": int(resolved or 0)}
 
 # Concurrency limiter for expensive investigations
 _investigation_semaphore = asyncio.Semaphore(settings.max_concurrent_investigations)
