@@ -1,8 +1,8 @@
-# PRISM Quick Start
+# WayPoint Quick Start
 
-PRISM is an AI-assisted incident investigation console. The fastest way to try it is Docker Compose.
+WayPoint is an AI-assisted incident investigation console. The fastest way to try it is Docker Compose.
 
-## 1. Start PRISM
+## 1. Start WayPoint
 
 ```bash
 cp .env.example .env
@@ -13,7 +13,7 @@ Open `http://localhost:8000`.
 
 ## 2. First run
 
-PRISM ships with ready-made investigation scenarios in the **Investigate** screen:
+WayPoint ships with ready-made investigation scenarios in the **Investigate** screen:
 
 - Memory / OOM
 - DB pool exhaustion
@@ -37,7 +37,7 @@ Production refuses to start when required secrets are missing or obvious default
 
 ## 4. Production checklist
 
-Before exposing PRISM to the internet:
+Before exposing WayPoint to the internet:
 
 - Use HTTPS at the load balancer/reverse proxy.
 - Set `APP_ENV=production`.
@@ -53,6 +53,6 @@ Swagger/ReDoc are intentionally disabled automatically in production. They remai
 
 ## 5. Important security model
 
-PRISM treats incoming logs, traces, metrics, and context as **untrusted evidence**. Evidence is redacted before persistence/LLM exposure, and continuous learning is deferred until an incident has a confirmed root cause.
+WayPoint treats incoming logs, traces, metrics, and context as **untrusted evidence**. Evidence is redacted before persistence/LLM exposure, and continuous learning is deferred until an incident has a confirmed root cause.
 
 The current API-key model is suitable for a protected single-tenant/internal deployment. It is **not** a complete multi-tenant SaaS identity system. For SaaS, add OIDC/OAuth2 users, tenant-bound credentials, RBAC, and database-level tenant isolation before onboarding unrelated organizations.
