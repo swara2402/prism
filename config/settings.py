@@ -60,6 +60,9 @@ class Settings(BaseSettings):
     llm_temperature: float = 0.2
     llm_max_tokens: int = 2048
     llm_request_timeout: float = 60.0
+    # Used only to derive the Fernet key for tenant LLM credentials. In non-local
+    # environments it must be set explicitly alongside PRISM_JWT_SECRET.
+    llm_credential_secret: str = Field(default="", alias="WAYPOINT_LLM_CREDENTIAL_SECRET")
 
     sentence_transformer_model: str = "all-MiniLM-L6-v2"
     embedding_dim: int = 384
@@ -251,6 +254,10 @@ class Settings(BaseSettings):
         errors: List[str] = []
         if not self.jwt_secret:
             errors.append("PRISM_JWT_SECRET is not configured")
+        if not self.llm_credential_secret:
+            errors.append("WAYPOINT_LLM_CREDENTIAL_SECRET is not configured")
+        elif len(self.llm_credential_secret) < self.jwt_secret_min_length:
+            errors.append("WAYPOINT_LLM_CREDENTIAL_SECRET is too short")
         elif len(self.jwt_secret) < self.jwt_secret_min_length:
             errors.append(
                 f"PRISM_JWT_SECRET is too short (min {self.jwt_secret_min_length} characters)"
