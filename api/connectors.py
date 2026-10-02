@@ -11,7 +11,7 @@ from sqlalchemy.exc import IntegrityError
 
 from api.deps import require_api_key, require_tenant
 from config.settings import settings
-from database.models import Incident
+from database.models import Incident, RootCause, Resolution, LessonLearned
 from database.repositories import create_incident, get_incident_by_idempotency_key
 from database.service_models import CustomerConnector
 from database.session import AsyncSessionLocal
@@ -392,17 +392,36 @@ async def onboarding_status(
             select(__import__("sqlalchemy").func.count(Incident.id)).where(Incident.tenant_id == tenant)
         )
     mapping_ready = bool(cfg.schema_mapping)
+    mapping_confirmed = bool(cfg.schema_mapping_confirmed_at)
     connector_ready = any(c.enabled for c in connectors)
+    analyzed_count = await session.scalar(
+        select(__import__("sqlalchemy").func.count(Incident.id)).where(
+            Incident.tenant_id == tenant,
+            Incident.status.in_(["analyzed", "resolved"]),
+        )
+    )
+    explained_count = await session.scalar(
+        select(__import__("sqlalchemy").func.count(RootCause.id)).where(RootCause.tenant_id == tenant)
+    )
+    confirmed_count = await session.scalar(
+        select(__import__("sqlalchemy").func.count(Resolution.id)).where(
+            Resolution.tenant_id == tenant,
+            Resolution.metadata_["confirmed_root_cause"].as_string().is_not(None),
+        )
+    )
+    learned_count = await session.scalar(
+        select(__import__("sqlalchemy").func.count(LessonLearned.id)).where(LessonLearned.tenant_id == tenant)
+    )
     return {
         "stages": [
             {"id": "connect", "label": "Connect", "complete": connector_ready},
             {"id": "understand", "label": "Understand schema", "complete": mapping_ready},
-            {"id": "confirm", "label": "Confirm mapping", "complete": mapping_ready},
+            {"id": "confirm", "label": "Confirm mapping", "complete": mapping_confirmed},
             {"id": "ingest", "label": "Ingest", "complete": bool(incident_count)},
-            {"id": "investigate", "label": "Investigate", "complete": bool(incident_count)},
-            {"id": "explain", "label": "Explain", "complete": bool(incident_count)},
-            {"id": "confirm_outcome", "label": "Confirm outcome", "complete": False},
-            {"id": "learn", "label": "Learn", "complete": False},
+            {"id": "investigate", "label": "Investigate", "complete": bool(analyzed_count)},
+            {"id": "explain", "label": "Explain", "complete": bool(explained_count)},
+            {"id": "confirm_outcome", "label": "Confirm outcome", "complete": bool(confirmed_count)},
+            {"id": "learn", "label": "Learn", "complete": bool(learned_count)},
         ],
         "connectors": [connector_summary(c) for c in connectors],
         "mapping": cfg.schema_mapping or {},
