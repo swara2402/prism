@@ -1,6 +1,6 @@
-# PRISM — API Reference
+# WayPoint — API Reference
 
-Complete reference for the PRISM HTTP API. Interactive docs are served at
+Complete reference for the WayPoint HTTP API. Interactive docs are served at
 `/docs` (Swagger UI) and the OpenAPI JSON at `/openapi.json` when the app is
 running.
 
@@ -303,7 +303,7 @@ against that ground truth.
 | `action`                 | string  | yes      | 1–2048 chars (the remediation taken)             |
 | `steps`                  | string[]| no       | ≤ 100 steps                                      |
 | `verified`               | bool    | no       | default `false`                                  |
-| `confirmed_root_cause`   | string  | optional | **Unlocks learning.** PRISM never learns from its own consensus. |
+| `confirmed_root_cause`   | string  | optional | **Unlocks learning.** WayPoint never learns from its own consensus. |
 | `ground_truth_source`    | string  | optional | `engineer_confirmed` \| `incident_postmortem` \| `external_system` \| `benchmark_label` |
 | `ground_truth_confidence`| float   | no       | 0.0–1.0                                          |
 | `confirmed_by`           | string  | no       | ≤ 128 chars (engineer / tool / runbook)          |
