@@ -38,7 +38,12 @@ class LLMAnalyzerAgent(BaseAgent):
         affected: List[str] = list(context.get("affected_services", []))
         metrics: Dict[str, Any] = context.get("metrics", {}) or {}
 
-        evidence = compress_logs(logs)
+        # In service mode the LLM is a reasoning layer over structured
+        # evidence produced by deterministic/specialist agents. Keep raw logs
+        # as a fallback for direct investigations, but prefer the evidence
+        # package assembled by the orchestrator.
+        evidence_package = context.get("_evidence_package")
+        evidence = compress_logs(logs) if not evidence_package else evidence_package
 
         prompt_parts: List[str] = [
             "You are a senior SRE. Investigate the following incident evidence",
@@ -69,7 +74,7 @@ class LLMAnalyzerAgent(BaseAgent):
                     "other than a single JSON object."
                 ),
                 schema=_LLM_SCHEMA,
-                evidence=evidence.to_prompt(max_chars=3000),
+                evidence=(evidence.to_prompt(max_chars=3000) if hasattr(evidence, "to_prompt") else str(evidence)[:6000]),
                 client=client,
             )
         except Exception as exc:
