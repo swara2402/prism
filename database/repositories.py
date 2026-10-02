@@ -421,9 +421,11 @@ async def list_approved_patterns(
     Bounded by ``limit``: this feeds plain ``GET`` endpoints, and an
     unbounded read amplification on a cheap route is a DoS primitive.
     """
-    stmt = select(dbm.Pattern).where(dbm.Pattern.approved.is_(True))
-    if tenant_id is not None:
-        stmt = stmt.where(dbm.Pattern.tenant_id == tenant_id)
+    tenant_id = _require_tenant(tenant_id, "list_approved_patterns")
+    stmt = select(dbm.Pattern).where(
+        dbm.Pattern.approved.is_(True),
+        dbm.Pattern.tenant_id == tenant_id,
+    )
     res = await session.execute(stmt.limit(limit))
     return res.scalars().all()
 
@@ -554,8 +556,16 @@ async def list_predictions(
 
 # ---------- Meta-reasoning ----------
 
-async def save_meta_reasoning(session: AsyncSession, **kwargs: Any) -> dbm.MetaReasoningRecord:
-    m = dbm.MetaReasoningRecord(**kwargs)
+async def save_meta_reasoning(
+    session: AsyncSession,
+    *,
+    tenant_id: Optional[str],
+    **kwargs: Any,
+) -> dbm.MetaReasoningRecord:
+    tenant_id = _require_tenant(tenant_id, "save_meta_reasoning")
+    if "tenant_id" in kwargs and kwargs["tenant_id"] != tenant_id:
+        raise ValueError("save_meta_reasoning cannot move a record across tenants")
+    m = dbm.MetaReasoningRecord(tenant_id=tenant_id, **kwargs)
     session.add(m)
     await session.flush()
     return m
