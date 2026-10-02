@@ -1,5 +1,5 @@
 /* ============================================================
-   PRISM — Incident Command Console
+   WayPoint — Incident Command Console
    Vanilla JS single-page app, same-origin calls to FastAPI.
    ============================================================ */
 "use strict";
@@ -479,7 +479,7 @@ function openDemoInvestigation() {
   navigate("investigate");
   setTimeout(() => {
     applyPreset("db_pool");
-    toast("Demo incident loaded. Run the investigation when ready.", { type: "info", title: "PRISM demo" });
+    toast("Demo incident loaded. Run the investigation when ready.", { type: "info", title: "WayPoint demo" });
     $("#inv-title")?.focus();
   }, 50);
 }
