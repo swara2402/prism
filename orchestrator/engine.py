@@ -81,9 +81,15 @@ async def _persist_finding(incident_id: str, payload: FindingPayload) -> None:
         async with AsyncSessionLocal() as session:
             _attach_provenance(payload)
             meta = dict(payload.metadata or {})
-            # Preserve per-finding provenance so a later confirmed resolution
-            # can grade this agent against ground truth.
-            meta.setdefault("root_cause_hint", payload.root_cause_hint)
+            # Preserve the semantic claim separately from generic prose so a
+            # later confirmed resolution can grade the agent against ground
+            # truth. If an agent omitted root_cause_hint but emitted
+            # hypotheses, the first hypothesis is the explicit equivalent.
+            hint = payload.root_cause_hint
+            if not hint and payload.hypotheses:
+                hint = payload.hypotheses[0]
+            if hint:
+                meta.setdefault("root_cause_hint", hint)
             meta.setdefault("hypotheses", list(payload.hypotheses or []))
             # Structural provenance (P1#18/19) is set by ``_attach_provenance``
             # on the live payload, so it is already inside ``meta``.
