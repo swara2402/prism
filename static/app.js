@@ -83,7 +83,7 @@ async function api(path, { method = "GET", body } = {}) {
   if (!res.ok) {
     let msg = data?.detail ?? data?.message ?? (res.statusText || `HTTP ${res.status}`);
     if (typeof msg !== "string") msg = JSON.stringify(msg);
-    if (res.status === 401) msg = "Unauthorized — set a valid API key in Settings";
+    if (res.status === 401) msg = "Session is not authorized for this request";
     const err = new Error(msg);
     err.status = res.status;
     throw err;
