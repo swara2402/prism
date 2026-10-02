@@ -21,6 +21,7 @@ class WorkspaceConfig(Base):
     llm_base_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
     llm_api_key_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
     schema_mapping: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    schema_mapping_confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
     )
