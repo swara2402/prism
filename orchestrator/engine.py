@@ -210,6 +210,22 @@ async def execute_action(
     return finding
 
 
+def _build_evidence_package(findings: List[FindingPayload]) -> str:
+    """Build a bounded, structured evidence package for the reasoning agent."""
+    parts: List[str] = []
+    for finding in findings:
+        evidence = finding.evidence or {}
+        parts.append(
+            f"Agent: {finding.agent_name}\\n"
+            f"Type: {finding.finding_type}\\n"
+            f"Confidence: {finding.confidence:.3f}\\n"
+            f"Finding: {finding.description[:1200]}\\n"
+            f"Root-cause hint: {(finding.root_cause_hint or 'none')[:500]}\\n"
+            f"Evidence: {str(evidence)[:1800]}"
+        )
+    return "\\n\\n".join(parts)[:12000]
+
+
 async def orchestrate(
     incident_id: str,
     incident_type: Optional[str],
@@ -251,12 +267,28 @@ async def orchestrate(
             duration_s=time.perf_counter() - start,
         )
 
-    # Run all selected agents concurrently
-    tasks = [
-        _run_one(agent, context, selection.reliability_scores.get(agent.name, 0.5))
-        for agent in selection.selected
-    ]
-    findings = await asyncio.gather(*tasks, return_exceptions=False)
+    # Specialist agents produce the evidence first. The LLM reasoning agent
+    # is deliberately downstream of that package so it synthesizes evidence
+    # instead of acting as a second, opaque evidence collector.
+    llm_agents = [a for a in selection.selected if a.name == "llm_analyzer"]
+    specialist_agents = [a for a in selection.selected if a.name != "llm_analyzer"]
+
+    findings: List[FindingPayload] = []
+    if specialist_agents:
+        specialist_tasks = [
+            _run_one(agent, context, selection.reliability_scores.get(agent.name, 0.5))
+            for agent in specialist_agents
+        ]
+        findings.extend(await asyncio.gather(*specialist_tasks, return_exceptions=False))
+
+    if llm_agents:
+        reasoning_context = dict(context)
+        reasoning_context["_evidence_package"] = _build_evidence_package(findings)
+        llm_tasks = [
+            _run_one(agent, reasoning_context, selection.reliability_scores.get(agent.name, 0.5))
+            for agent in llm_agents
+        ]
+        findings.extend(await asyncio.gather(*llm_tasks, return_exceptions=False))
 
     # Persist + update invocation counters (best-effort, parallel)
     if persist:
