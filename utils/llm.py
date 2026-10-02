@@ -306,6 +306,26 @@ class LLMClient:
             logger.warning("llm_provider_call_failed", extra={"provider": self.provider})
             return self._fallback(prompt)
 
+    async def test_connection(self) -> bool:
+        """Verify the configured provider without falling back to local heuristics."""
+        try:
+            if self.provider in {"openai", "openai_compatible"}:
+                if not self.api_key:
+                    return False
+                base = (self.host or "https://api.openai.com/v1").rstrip("/")
+                url = base if base.endswith("/models") else f"{base}/models"
+                async with httpx.AsyncClient(timeout=self.timeout) as http:
+                    resp = await http.get(
+                        url,
+                        headers={"Authorization": f"Bearer {self.api_key}"},
+                    )
+                    return resp.status_code == 200
+            async with httpx.AsyncClient(timeout=self.timeout) as http:
+                resp = await http.get(f"{self.host.rstrip('/')}/api/tags")
+                return resp.status_code == 200
+        except Exception:
+            return False
+
     async def embeddings(self, text: str) -> List[float]:
         """Return embedding vector for ``text``."""
         if not settings.enable_ollama:
