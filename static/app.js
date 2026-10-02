@@ -298,15 +298,15 @@ async function loadOverview() {
   const ag = agents.status === "fulfilled" ? agents.value : [];
   const pend = pending.status === "fulfilled" ? pending.value : [];
   const stats = incidentStats.status === "fulfilled" ? incidentStats.value : null;
-  const open = stats ? Number(stats.open || 0) : inc.filter((i) => !["resolved", "closed"].includes((i.status || "").toLowerCase())).length;
+  const open = stats ? Number(stats.open || 0) : null;
 
   const card = (label, value, foot, cls) =>
     `<div class="stat-card ${cls || ""}"><span class="stat-label">${label}</span>
      <div class="stat-value">${value}</div>${foot ? `<div class="stat-foot">${foot}</div>` : ""}</div>`;
 
   statsEl.innerHTML = [
-    card("Total incidents", stats ? Number(stats.total || 0) : inc.length, stats ? "database aggregate" : (incidents.status === "fulfilled" ? `${relTime(inc[0]?.created_at)} newest` : "unavailable"), "acc"),
-    card("Open incidents", open, stats ? `${Number(stats.critical || 0)} critical` : (inc.length ? `${open ? "attention needed" : "all clear"}` : "—"), open ? "warn" : "ok"),
+    card("Total incidents", stats ? Number(stats.total || 0) : "—", stats ? "database aggregate" : "aggregate unavailable", "acc"),
+    card("Open incidents", open === null ? "—" : open, stats ? `${Number(stats.critical || 0)} critical` : "aggregate unavailable", open === null ? "slate" : (open ? "warn" : "ok")),
     card("Agents", ag.length, "registered analyzers", "acc"),
     card("Patterns pending", pend.length, pend.length ? "awaiting approval" : "none", pend.length ? "warn" : "ok"),
     card("Memory size", health.status === "fulfilled" ? health.value.memory_size : "—", "embedded incidents", "acc"),
