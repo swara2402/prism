@@ -211,7 +211,7 @@ async def login_page() -> FileResponse:
     return FileResponse(STATIC_DIR / "login.html")
 
 
-@app.get("/", include_in_schema=False, name="ui")
+@app.api_route("/", methods=["GET", "HEAD"], include_in_schema=False, name="ui")
 async def ui_root(request: Request):
     if not request.cookies.get(COOKIE_NAME):
         return RedirectResponse("/login", status_code=303)
