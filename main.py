@@ -222,7 +222,8 @@ async def ui_root(request: Request):
 async def ui_bundle() -> Response:
     legacy = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
     bridge = (STATIC_DIR / "session-bridge.js").read_text(encoding="utf-8")
-    return Response(bridge + "\n" + legacy, media_type="application/javascript")
+    service_settings = (STATIC_DIR / "service-settings.js").read_text(encoding="utf-8")
+    return Response(bridge + "\n" + legacy + "\n" + service_settings, media_type="application/javascript")
 
 
 @app.get("/api/info", tags=["meta"])
