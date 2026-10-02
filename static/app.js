@@ -1114,7 +1114,7 @@ async function searchMemory(q) {
 /* ============================================================
    Agents
    ============================================================ */
-async function loadAgents() {
+async async function loadAgents() {
   if (state.agentsLoaded) return;
   const grid = $("#agent-grid");
   grid.innerHTML = skeletonRows(8);
@@ -1144,6 +1144,30 @@ async function loadAgents() {
 /* ============================================================
    Patterns
    ============================================================ */
+
+async function matchPatterns() {
+  const logs = $("#pat-logs").value.split("\n").map((l) => l.trim()).filter(Boolean);
+  const out = $("#pat-match-results");
+  if (!logs.length) { toast("Paste at least one log line to match.", { type: "warn" }); return; }
+  out.innerHTML = `<div class="skeleton-rows">${Array(2).fill('<div class="skeleton"></div>').join("")}</div>`;
+  try {
+    const hits = await api("/patterns/match", { method: "POST", body: { logs } });
+    out.innerHTML = hits.length
+      ? `<div class="match-res">${hits.map((h) => `
+          <div class="match-hit">
+            ${monoId(h.pattern_id)}
+            <div style="flex:1;min-width:0">
+              <div class="hint" style="color:var(--text);font-family:var(--mono);font-size:11.5px;word-break:break-all">${esc(h.matched_signature)}</div>
+              <div class="hint" style="margin-top:3px">${esc(h.root_cause_hint)}</div>
+            </div>
+            <span class="pill ${confCls(h.confidence) === "ok" ? "pill-ok" : confCls(h.confidence) === "warn" ? "pill-warn" : "pill-bad"}">${pct(h.confidence)}%</span>
+          </div>`).join("")}</div>`
+      : emptyState("No pattern matches", "None of the approved patterns matched these logs.");
+  } catch (err) {
+    out.innerHTML = errorState(err.message, `()=>matchPatterns()`);
+  }
+}
+
 function initPatterns() {
   $("#pat-match").addEventListener("click", async () => {
     const logs = $("#pat-logs").value.split("\n").map((l) => l.trim()).filter(Boolean);
