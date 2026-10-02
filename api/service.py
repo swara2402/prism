@@ -201,28 +201,9 @@ async def ingest(
     except Exception as exc:
         raise HTTPException(422, f"Customer data could not be normalized: {exc}") from exc
 
-    # Persist first, then optionally run the existing investigation pipeline.
-    from database.repositories import create_incident
-    async with AsyncSessionLocal() as session:
-        inc = await create_incident(
-            session,
-            tenant_id=tenant,
-            title=incident.title,
-            description=incident.description,
-            severity=incident.severity,
-            status="open",
-            incident_type=incident.incident_type,
-            affected_services=incident.affected_services,
-            raw_logs=incident.raw_logs,
-            metrics=incident.metrics,
-            traces=incident.traces,
-            topology=incident.topology,
-            context=incident.context,
-            started_at=incident.started_at,
-        )
-        await session.commit()
-        incident_id = inc.id
-
+    # An analyzed ingest must enter the existing investigation pipeline directly.
+    # Do not persist an "open" row first and then create/deduplicate a second row
+    # inside _run_investigation.
     investigation = None
     if body.run_investigation:
         from api.investigation import _run_investigation
@@ -232,6 +213,28 @@ async def ingest(
             tenant_id=tenant,
             principal_role=getattr(getattr(request.state, "principal", None), "role", "engineer"),
         )
+        incident_id = investigation.incident_id
+    else:
+        from database.repositories import create_incident
+        async with AsyncSessionLocal() as session:
+            inc = await create_incident(
+                session,
+                tenant_id=tenant,
+                title=incident.title,
+                description=incident.description,
+                severity=incident.severity,
+                status="open",
+                incident_type=incident.incident_type,
+                affected_services=incident.affected_services,
+                raw_logs=incident.raw_logs,
+                metrics=incident.metrics,
+                traces=incident.traces,
+                topology=incident.topology,
+                context=incident.context,
+                started_at=incident.started_at,
+            )
+            await session.commit()
+            incident_id = inc.id
 
     return IngestOut(
         incident_id=incident_id,
