@@ -1114,7 +1114,7 @@ async function searchMemory(q) {
 /* ============================================================
    Agents
    ============================================================ */
-async async function loadAgents() {
+async function loadAgents() {
   if (state.agentsLoaded) return;
   const grid = $("#agent-grid");
   grid.innerHTML = skeletonRows(8);
