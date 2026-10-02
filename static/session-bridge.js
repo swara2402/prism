@@ -12,8 +12,24 @@
     opts.headers.delete("X-API-Key");
     const response = await nativeFetch(input, opts);
     const url = typeof input === "string" ? input : input?.url || "";
-    if (response.status === 401 && !url.includes("/auth/login") && !url.includes("/auth/me")) {
-      window.location.replace("/login");
+    if (response.status === 401 && !url.includes("/auth/login") && !url.includes("/auth/register") && !url.includes("/auth/logout") && !url.includes("/auth/me")) {
+      // A single endpoint returning 401 must not eject an otherwise-valid
+      // workspace session. Revalidate the session itself first. This prevents
+      // transient/endpoint-specific auth failures from unexpectedly sending
+      // the user back to the login screen.
+      try {
+        const sessionCheck = await nativeFetch("/auth/me", {
+          credentials: "same-origin",
+          cache: "no-store",
+          headers: { "X-Request-ID": crypto.randomUUID?.() || String(Date.now()) },
+        });
+        if (sessionCheck.status === 401) {
+          window.location.replace("/login");
+        }
+      } catch (_) {
+        // Keep the current page on a network failure. The original request
+        // already carries its own error state and can be retried by the UI.
+      }
     }
     return response;
   };
