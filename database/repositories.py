@@ -563,9 +563,13 @@ async def save_meta_reasoning(
     **kwargs: Any,
 ) -> dbm.MetaReasoningRecord:
     tenant_id = _require_tenant(tenant_id, "save_meta_reasoning")
-    if "tenant_id" in kwargs and kwargs["tenant_id"] != tenant_id:
-        raise ValueError("save_meta_reasoning cannot move a record across tenants")
-    m = dbm.MetaReasoningRecord(tenant_id=tenant_id, **kwargs)
+    incident_id = kwargs.get("incident_id")
+    if not incident_id:
+        raise ValueError("save_meta_reasoning requires incident_id")
+    incident = await session.get(dbm.Incident, incident_id)
+    if incident is None or incident.tenant_id != tenant_id:
+        raise ValueError("Incident does not belong to the requested tenant")
+    m = dbm.MetaReasoningRecord(**kwargs)
     session.add(m)
     await session.flush()
     return m
