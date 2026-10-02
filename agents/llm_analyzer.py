@@ -13,7 +13,7 @@ from typing import Any, Dict, List
 
 from agents.base import BaseAgent, FindingPayload
 from utils.evidence import compress_logs
-from utils.llm import generate_structured
+from utils.llm import LLMClient, generate_structured
 
 _LLM_SCHEMA = {
     "root_cause": {"type": str, "required": True, "default": "unknown", "maxlen": 500},
@@ -53,6 +53,14 @@ class LLMAnalyzerAgent(BaseAgent):
 
         prompt = "\n".join(prompt_parts)
 
+        llm_cfg = context.get("_llm_config") or {}
+        client = LLMClient(
+            host=llm_cfg.get("base_url"),
+            model=llm_cfg.get("model"),
+            provider=llm_cfg.get("provider", "ollama"),
+            api_key=llm_cfg.get("api_key"),
+            timeout=float(llm_cfg.get("timeout", 60.0)),
+        )
         try:
             data = await generate_structured(
                 prompt,
@@ -62,6 +70,7 @@ class LLMAnalyzerAgent(BaseAgent):
                 ),
                 schema=_LLM_SCHEMA,
                 evidence=evidence.to_prompt(max_chars=3000),
+                client=client,
             )
         except Exception as exc:
             return FindingPayload(
